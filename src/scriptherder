@@ -65,6 +65,18 @@ class Job(object):
         self._pid = None
         self._output = None
 
+    def __str__(self):
+        start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
+        duration = self._end_time - self._start_time
+        if duration < 1:
+            # milliseconds
+            duration = '{:0.3f}m'.format(duration * 1000)
+        cmd = ''.join(self._cmd)[:40]
+        return '{start}  {duration:>6}s  exit={exit}  {cmd}'.format(start=start,
+                                                                    duration=duration,
+                                                                    exit=self.exit_status,
+                                                                    cmd=cmd,)
+
     @property
     def cmd(self):
         """
@@ -90,7 +102,9 @@ class Job(object):
 
         @rtype: int() or None
         """
-        return self._start_time
+        if self._start_time is None:
+            return None
+        return int(self._start_time)
 
     @property
     def end_time(self):
@@ -99,7 +113,9 @@ class Job(object):
 
         @rtype: int() or None
         """
-        return self._end_time
+        if self._end_time is None:
+            return None
+        return int(self._end_time)
 
     @property
     def exit_status(self):
@@ -132,7 +148,7 @@ class Job(object):
         """
         Run script, storing various aspects of the results.
         """
-        self._start_time = int(time.time())
+        self._start_time = time.time()
         proc = subprocess.Popen(self._cmd,
                                 cwd='/',
                                 stdout=subprocess.PIPE,
@@ -140,7 +156,7 @@ class Job(object):
                                 close_fds=True,
                                 )
         (stdout, _stderr) = proc.communicate()
-        self._end_time = int(time.time())
+        self._end_time = time.time()
         self._output = stdout
         self._exit_status = proc.returncode
         self._pid = proc.pid
@@ -166,11 +182,11 @@ class Job(object):
         fn = os.path.join(datadir, filename)
         f = open(fn + '.tmp', 'w')
         data = {'cmd': self._cmd,
-                'start_time': self.start_time,
-                'end_time': self.end_time,
+                'start_time': self._start_time,
+                'end_time': self._end_time,
                 'pid': self.pid,
                 'exit_status': self.exit_status,
-                'output': self.output,
+                'output': self.output,    # XXX compress really large output?
                 'version': 1,
                 }
         f.write(json.dumps(data, indent = 4, sort_keys = True))
@@ -178,7 +194,42 @@ class Job(object):
         f.close()
         os.rename(fn + '.tmp', fn)
 
+    def from_file(self, filename):
+        """
+        Initialize this Job instance with data loaded from a file (previously created with
+        `save_to_file()'.
 
+        @param filename: Filename to load data from
+        @type filename: string
+
+        @rtype: Job
+        """
+        f = open(filename, 'r')
+        data = json.loads(f.read(100 * 1024 * 1024))
+        f.close()
+        assert data['version'] == 1
+        for x in data['cmd']:
+            assert(isinstance(x, basestring))
+        self._cmd = data['cmd']
+        self._start_time = data['start_time']
+        self._end_time = data['end_time']
+        self._pid = data['pid']
+        self._exit_status = data['exit_status']
+        self._output = data['output']
+        return self
+
+
+def job_from_file(filename):
+    """
+    Recreate Job() instance from saved file.
+
+    @param filename: Filename to load script invocation details from
+
+    @type filename: string
+    @rtype: Job
+    """
+    job = Job('')
+    return job.from_file(filename)
 
 
 def parse_args(defaults):
@@ -236,8 +287,11 @@ def mode_wrap(args, logger):
 
 
 def mode_ls(args, logger):
-    return None
-
+    files = [f for f in os.listdir(args.datadir) if os.path.isfile(os.path.join(args.datadir, f))]
+    for file in files:
+        filename = os.path.join(args.datadir, file)
+        job = job_from_file(filename)
+        print '{!s}   {!s}'.format(job, filename)
 
 def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):
     """
