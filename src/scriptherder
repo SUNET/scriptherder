@@ -1,0 +1,288 @@
+#!/usr/bin/env python
+#
+# Copyright 2014 SUNET. All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without modification, are
+# permitted provided that the following conditions are met:
+#
+#    1. Redistributions of source code must retain the above copyright notice, this list of
+#       conditions and the following disclaimer.
+#
+#    2. Redistributions in binary form must reproduce the above copyright notice, this list
+#       of conditions and the following disclaimer in the documentation and/or other materials
+#       provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY SUNET ``AS IS'' AND ANY EXPRESS OR IMPLIED
+# WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+# FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL SUNET OR
+# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+# ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+# NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# The views and conclusions contained in the software and documentation are those of the
+# authors and should not be interpreted as representing official policies, either expressed
+# or implied, of SUNET.
+#
+# Author : Fredrik Thulin <fredrik@thulin.net>
+#
+
+"""
+Scriptherder can be run in one othe following modes:
+
+   wrap      -- Stores output, exit status etc. about a script invocation
+   ls        -- Lists the logged script invocations
+
+"""
+
+import os
+import sys
+import time
+import json
+import logging
+import logging.handlers
+import argparse
+import subprocess
+
+_defaults = {'debug': False,
+             'syslog': False,
+             'mode': 'ls',
+             'datadir': '/var/cache/scriptherder',
+             }
+
+
+class Job(object):
+
+    def __init__(self, cmdline):
+        for x in cmdline:
+            assert(isinstance(x, basestring))
+        self._cmd = cmdline
+        self._start_time = None
+        self._end_time = None
+        self._exit_status = None
+        self._pid = None
+        self._output = None
+
+    @property
+    def cmd(self):
+        """
+        The wrapped scripts name.
+
+        @rtype: string
+        """
+        return self._cmd[0]
+
+    @property
+    def args(self):
+        """
+        The wrapped scripts arguments.
+
+        @rtype: [string]
+        """
+        return self._cmd[1:]
+
+    @property
+    def start_time(self):
+        """
+        The start time of the script invocation.
+
+        @rtype: int() or None
+        """
+        return self._start_time
+
+    @property
+    def end_time(self):
+        """
+        The end time of the script invocation.
+
+        @rtype: int() or None
+        """
+        return self._end_time
+
+    @property
+    def exit_status(self):
+        """
+        The exit status of the script invocation.
+
+        @rtype: int() or None
+        """
+        return self._exit_status
+
+    @property
+    def pid(self):
+        """
+        The process ID of the script invocation.
+
+        @rtype: int() or None
+        """
+        return self._pid
+
+    @property
+    def output(self):
+        """
+        The output (STDOUT and STDERR) of the script invocation.
+
+        @rtype: [string]
+        """
+        return self._output
+
+    def run(self):
+        """
+        Run script, storing various aspects of the results.
+        """
+        self._start_time = int(time.time())
+        proc = subprocess.Popen(self._cmd,
+                                cwd='/',
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                close_fds=True,
+                                )
+        (stdout, _stderr) = proc.communicate()
+        self._end_time = int(time.time())
+        self._output = stdout
+        self._exit_status = proc.returncode
+        self._pid = proc.pid
+
+    def save_to_file(self, datadir, filename=None):
+        """
+        Create a record with the details of a script invocation.
+
+        @param datadir: Directory to keep records in
+        @param filename: Filename to use - default is reasonably constructed
+
+        @type datadir: string
+        @type filename: string or None
+        """
+        if filename is None:
+            fn = ''
+            for x in self.cmd:
+                if x.isalnum():
+                    fn += x
+                else:
+                    fn += '_'
+            filename = '{!s}_{!s}_{!s}'.format(fn, self.start_time, self.pid)
+        fn = os.path.join(datadir, filename)
+        f = open(fn + '.tmp', 'w')
+        data = {'cmd': self._cmd,
+                'start_time': self.start_time,
+                'end_time': self.end_time,
+                'pid': self.pid,
+                'exit_status': self.exit_status,
+                'output': self.output,
+                'version': 1,
+                }
+        f.write(json.dumps(data, indent = 4, sort_keys = True))
+        f.write('\n')
+        f.close()
+        os.rename(fn + '.tmp', fn)
+
+
+
+
+def parse_args(defaults):
+    """
+    Parse the command line arguments
+
+    @param defaults: Argument defaults
+
+    @type defaults: dict
+    """
+    parser = argparse.ArgumentParser(description = 'Script herder script',
+                                     add_help = True,
+                                     formatter_class = argparse.ArgumentDefaultsHelpFormatter,
+                                     )
+
+    parser.add_argument('--debug',
+                        dest = 'debug',
+                        action = 'store_true', default = defaults['debug'],
+                        help = 'Enable debug operation',
+                        )
+    parser.add_argument('--syslog',
+                        dest = 'syslog',
+                        action = 'store_true', default = defaults['syslog'],
+                        help = 'Enable syslog output',
+                        )
+    parser.add_argument('--mode',
+                        dest = 'mode',
+                        choices = ['wrap', 'ls'], default = defaults['mode'],
+                        help = 'What mode to run in',
+                        )
+    parser.add_argument('-d', '--datadir',
+                        dest = 'datadir',
+                        default = defaults['datadir'],
+                        help = 'Data directory',
+                        metavar = 'PATH',
+                        )
+
+    parser.add_argument('cmd',
+                        nargs = '*', default = [],
+                        help = 'Script command',
+                        metavar = 'CMD',
+                        )
+
+    args = parser.parse_args()
+    return args
+
+
+def mode_wrap(args, logger):
+    job = Job(args.cmd)
+    logger.debug("Invoking '{!s}'".format(''.join(args.cmd)))
+    job.run()
+    logger.debug("Finished, exit status {!r}".format(job.exit_status))
+    logger.debug("Job output:\n{!s}".format(job.output))
+    job.save_to_file(args.datadir)
+
+
+def mode_ls(args, logger):
+    return None
+
+
+def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):
+    """
+    Main entry point for either wrapping a script, or checking the status of it.
+
+    @param myname: String, used for logging
+    @param args: Command line arguments
+    @param logger: logging logger
+    @param defaults: Default command line arguments
+
+    @type myname: string
+    @type args: None or [string]
+    @type logger: logging.logger
+    @type defaults: dict
+    """
+    if not args:
+        args = parse_args(defaults)
+
+    # initialize various components
+    if not logger:
+        logger = logging.getLogger(myname)
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+        # log to stderr when debugging
+        formatter = logging.Formatter('%(asctime)s %(name)s %(threadName)s: %(levelname)s %(message)s')
+        stream_h = logging.StreamHandler(sys.stderr)
+        stream_h.setFormatter(formatter)
+        logger.addHandler(stream_h)
+    if args.syslog:
+        syslog_h = logging.handlers.SysLogHandler()
+        formatter = logging.Formatter('%(name)s: %(levelname)s %(message)s')
+        syslog_h.setFormatter(formatter)
+        logger.addHandler(syslog_h)
+
+    if args.mode == 'wrap':
+        mode_wrap(args, logger)
+    if args.mode == 'ls':
+        mode_ls(args, logger)
+
+
+if __name__ == '__main__':
+    try:
+        progname = os.path.basename(sys.argv[0])
+        if main(progname):
+            sys.exit(0)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(0)
