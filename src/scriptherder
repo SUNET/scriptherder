@@ -65,6 +65,7 @@ class Job(object):
         self._exit_status = None
         self._pid = None
         self._output = None
+        self._filename = None
         if self._name is None:
             self._name = os.path.basename(self.cmd)
 
@@ -150,6 +151,15 @@ class Job(object):
         return self._pid
 
     @property
+    def filename(self):
+        """
+        The filename this job is stored in.
+
+        @rtype: string or None
+        """
+        return self._filename
+
+    @property
     def output(self):
         """
         The output (STDOUT and STDERR) of the script invocation.
@@ -157,7 +167,6 @@ class Job(object):
         @rtype: [string]
         """
         return self._output
-
     def run(self):
         """
         Run script, storing various aspects of the results.
@@ -208,6 +217,7 @@ class Job(object):
         f.write('\n')
         f.close()
         os.rename(fn + '.tmp', fn)
+        self._filename = filename
 
     def from_file(self, filename):
         """
@@ -232,6 +242,7 @@ class Job(object):
         self._pid = data['pid']
         self._exit_status = data['exit_status']
         self._output = data['output']
+        self._filename = filename
         return self
 
 
@@ -309,13 +320,17 @@ def mode_wrap(args, logger):
 
 def mode_ls(args, logger):
     files = [f for f in os.listdir(args.datadir) if os.path.isfile(os.path.join(args.datadir, f))]
+    jobs = []
     for file in files:
         filename = os.path.join(args.datadir, file)
         job = job_from_file(filename)
         if args.cmd:
             if args.cmd[0] != job.name:
                 continue
-        print '{!s}   {!s}'.format(job, filename)
+        jobs.append(job)
+
+    for this in sorted(jobs, key=lambda x: x.start_time):
+        print '{!s}   {!s}'.format(this, this.filename)
 
 
 def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):
