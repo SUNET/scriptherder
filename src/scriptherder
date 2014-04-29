@@ -34,10 +34,13 @@ Scriptherder can be run in one othe following modes:
 
    wrap      -- Stores output, exit status etc. about a script invocation
    ls        -- Lists the logged script invocations
+   check     -- Check if script execution results match given criterias,
+                output Nagios compatible result
 
 """
 
 import os
+import re
 import sys
 import time
 import json
@@ -45,13 +48,24 @@ import logging
 import logging.handlers
 import argparse
 import subprocess
+import ConfigParser
 
 _defaults = {'debug': False,
              'syslog': False,
              'mode': 'ls',
              'datadir': '/var/cache/scriptherder',
+             'checkdir': '/etc/scriptherder/check',
              }
 
+_check_defaults = {'ok': 'exit_status=0,max_age=8h',
+                   'warning': 'exit_status=0,max_age=24h',
+                   }
+
+exit_status = {'OK': 0,
+               'WARNING': 1,
+               'CRITICAL': 2,
+               'UNKNOWN': 3,
+               }
 
 class Job(object):
 
@@ -69,17 +83,24 @@ class Job(object):
         if self._name is None:
             self._name = os.path.basename(self.cmd)
 
+    def __repr__(self):
+        start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
+        return '<{} instance at {:#x}: \'{name}\' start={start}, exit={exit}>'.format(
+            self.__class__.__name__,
+            id(self),
+            name=self.name,
+            start = start,
+            exit = self.exit_status,
+        )
+
     def __str__(self):
         start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
-        duration = self._end_time - self._start_time
-        if duration < 1:
-            # milliseconds
-            duration = '{:0.3f}m'.format(duration * 1000)
-        cmd = ''.join(self._cmd)[:40]
-        return '{start}  {duration:>6}s  exit={exit}  {cmd}'.format(start=start,
-                                                                    duration=duration,
-                                                                    exit=self.exit_status,
-                                                                    cmd=cmd,)
+        return '\'{name}\' start={start}, duration={duration:>6}, exit={exit}'.format(
+            name = self.name,
+            start = start,
+            duration = self.duration_str,
+            exit = self.exit_status,
+        )
 
     @property
     def name(self):
@@ -133,6 +154,19 @@ class Job(object):
         return int(self._end_time)
 
     @property
+    def duration_str(self):
+        """
+        Time spent executing job, as a human readable string.
+
+        @rtype: string
+        """
+        duration = self._end_time - self._start_time
+        if duration < 1:
+            # milliseconds
+            return '{:0.3f}ms'.format(duration * 1000)
+        return '{!s}s'.format(duration)
+
+    @property
     def exit_status(self):
         """
         The exit status of the script invocation.
@@ -167,6 +201,7 @@ class Job(object):
         @rtype: [string]
         """
         return self._output
+
     def run(self):
         """
         Run script, storing various aspects of the results.
@@ -246,6 +281,56 @@ class Job(object):
         return self
 
 
+class Check(object):
+
+    def __init__(self, filename, logger):
+        self.logger = logger
+        self.config = ConfigParser.ConfigParser(_check_defaults)
+        if not self.config.read([filename]):
+            raise ValueError("Failed loading config file {!r}".format(filename))
+        _section = 'check'
+        self._ok_criteria = [x.strip() for x in self.config.get(_section, 'ok').split(',')]
+        self._warning_criteria = [x.strip() for x in self.config.get(_section, 'warning').split(',')]
+
+    def job_is_ok(self, job):
+        res = True
+        for this in self._ok_criteria:
+            if not self._evaluate(this, job):
+                self.logger.debug("Job {!r} failed OK criteria {!r}".format(job, this))
+                res = False
+        self.logger.debug("{!r} is OK result: {!r}".format(job, res))
+        return res
+
+    def job_is_warning(self, job):
+        res = True
+        for this in self._warning_criteria:
+            if not self._evaluate(this, job):
+                self.logger.debug("Job {!r} failed WARNING criteria {!r}".format(job, this))
+                res = False
+        self.logger.debug("{!r} is WARNING result: {!r}".format(job, res))
+        return res
+
+    def _evaluate(self, criteria, job):
+        (what, value) = criteria.split('=')
+        what.strip()
+        value.strip()
+        if what == 'exit_status':
+            value = int(value)
+            res = (job.exit_status == value)
+            self.logger.debug("Evaluate criteria {!r}: ({!r} == {!r}) {!r}".format(
+                criteria, job.exit_status, value, res))
+            return res
+        elif what == 'max_age':
+            value = _parse_time_value(value)
+            now = int(time.time())
+            res = (job.end_time > (now - value))
+            self.logger.debug("Evaluate criteria {!r}: ({!r} > ({!r} - {!r}) {!r}".format(
+                criteria, job.end_time, now, value, res))
+            return res
+        self.logger.debug("Evaluation of unknown criteria {!r}, defaulting to False".format(criteria))
+        return False
+
+
 def job_from_file(filename):
     """
     Recreate Job() instance from saved file.
@@ -284,13 +369,19 @@ def parse_args(defaults):
                         )
     parser.add_argument('--mode',
                         dest = 'mode',
-                        choices = ['wrap', 'ls'], default = defaults['mode'],
+                        choices = ['wrap', 'ls', 'check'], default = defaults['mode'],
                         help = 'What mode to run in',
                         )
     parser.add_argument('-d', '--datadir',
                         dest = 'datadir',
                         default = defaults['datadir'],
                         help = 'Data directory',
+                        metavar = 'PATH',
+                        )
+    parser.add_argument('--checkdir',
+                        dest = 'checkdir',
+                        default = defaults['checkdir'],
+                        help = 'Check definitions directory',
                         metavar = 'PATH',
                         )
     parser.add_argument('-N', '--name',
@@ -316,22 +407,131 @@ def mode_wrap(args, logger):
     logger.debug("Finished, exit status {!r}".format(job.exit_status))
     logger.debug("Job output:\n{!s}".format(job.output))
     job.save_to_file(args.datadir)
+    return True
 
 
 def mode_ls(args, logger):
+    jobs = _get_job_results(args, logger)
+    for this in sorted(jobs, key=lambda x: x.start_time):
+        start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
+        print('{start}  {duration:>6}  exit={exit}  name={name}   {filename}'.format(
+            start = start,
+            duration = this.duration,
+            exit = this.exit_status,
+            name = this.name,
+            filename = this.filename,
+        ))
+    return True
+
+
+def mode_check(args, logger):
+    jobs = _get_job_results(args, logger)
+
+    # group the jobs by their name
+    by_name = {}
+    for this in jobs:
+        if this.name not in by_name:
+            by_name[this.name] = []
+        by_name[this.name].append(this)
+
+    total_ok = []
+    total_warning = []
+    total_critical = []
+
+    # determine total check status based on all logged invocations of this job
+    for (name, jobs) in by_name.items():
+        # Sort jobs, oldest first
+        jobs = sorted(jobs, key=lambda x: x.start_time)
+        # Load the evaluation criterias for this job
+        check_filename = os.path.join(args.checkdir, name + '.ini')
+        logger.debug("Loading check definition from {!r}".format(check_filename))
+        check = Check(check_filename, logger)
+        logger.debug("Checking {!r}: {!r}".format(name, jobs))
+
+        jobs_ok = []
+        jobs_warning = []
+        jobs_critical = []
+        for job in jobs:
+            if check.job_is_ok(job):
+                jobs_ok.append(job)
+            elif check.job_is_warning(job):
+                jobs_warning.append(job)
+            else:
+                jobs_critical.append(job)
+        logger.debug("Raw status OK      : {!r}".format(jobs_ok))
+        logger.debug("Raw status WARN    : {!r}".format(jobs_warning))
+        logger.debug("Raw status CRITICAL: {!r}".format(jobs_critical))
+        if jobs_ok:
+            total_ok.append(jobs_ok[-1])
+        elif jobs_warning:
+            total_warning.append(jobs_warning[-1])
+        else:
+            total_critical.append(jobs_critical[-1])
+
+    if args.cmd:
+        # Single job check requested, output detailed information
+        if total_ok:
+            print('OK: {!s}'.format(total_ok[-1]))
+            return exit_status['OK']
+        if total_warning:
+            print('WARNING: {!s}'.format(total_warning[-1]))
+            return exit_status['WARNING']
+        if total_critical:
+            print('CRITICAL: {!s}'.format(total_critical[-1]))
+            return exit_status['CRITICAL']
+        print "UNKNOWN - no jobs found for {!r}?".format(args.cmd)
+        return exit_status['UNKNOWN']
+
+    # When not looking at multiple jobs at once, logic gets a bit reversed - if ANY
+    # job invocation is CRITICAL/WARNING, the aggregate message given to
+    # Nagios will have to be a failure.
+    if total_critical:
+        print("CRITICAL: {num} job(s) in this state: {names}".format(
+            num = len(total_critical),
+            names = ', '.join([str(x.name) for x in total_critical]),
+            ))
+        return exit_status['CRITICAL']
+    if total_warning:
+        print("WARNING: {num} job(s) in this state: {names}".format(
+            num = len(total_warning),
+            names = ', '.join([str(x.name) for x in total_warning]),
+            ))
+        return exit_status['WARNING']
+    if total_ok:
+        print("OK: {num} job(s) in this state: {names}".format(
+            num = len(total_ok),
+            names = ', '.join([x.name for x in total_ok]),
+            ))
+        return exit_status['OK']
+    print "UNKNOWN - no jobs found?"
+    return exit_status['UNKNOWN']
+
+
+def _get_job_results(args, logger):
     files = [f for f in os.listdir(args.datadir) if os.path.isfile(os.path.join(args.datadir, f))]
     jobs = []
-    for file in files:
-        filename = os.path.join(args.datadir, file)
+    for this in files:
+        filename = os.path.join(args.datadir, this)
         job = job_from_file(filename)
         if args.cmd:
             if args.cmd[0] != job.name:
+                logger.debug("Skipping '{!s}' not matching '{!s}' (file {!s})".format(job.name, args.cmd[0], filename))
                 continue
         jobs.append(job)
+    return jobs
 
-    for this in sorted(jobs, key=lambda x: x.start_time):
-        print '{!s}   {!s}'.format(this, this.filename)
-
+def _parse_time_value(value):
+    match = re.match('^(\d+)([hmsd]*)$', value)
+    if match:
+        num = int(match.group(1))
+        what = match.group(2)
+        if what == 'm':
+            return num * 60
+        if what == 'h':
+            return num * 3600
+        if what == 'd':
+            return num * 86400
+        return num
 
 def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):
     """
@@ -367,15 +567,22 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
         logger.addHandler(syslog_h)
 
     if args.mode == 'wrap':
-        mode_wrap(args, logger)
-    if args.mode == 'ls':
-        mode_ls(args, logger)
-
+        return mode_wrap(args, logger)
+    elif args.mode == 'ls':
+        return mode_ls(args, logger)
+    elif args.mode == 'check':
+        return mode_check(args, logger)
+    else:
+        logger.error("Invalid mode {!r}".format(args.mode))
+        return False
 
 if __name__ == '__main__':
     try:
         progname = os.path.basename(sys.argv[0])
-        if main(progname):
+        res = main(progname)
+        if isinstance(res, int):
+            sys.exit(res)
+        if res:
             sys.exit(0)
         sys.exit(1)
     except KeyboardInterrupt:
