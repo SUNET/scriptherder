@@ -67,9 +67,15 @@ exit_status = {'OK': 0,
                'UNKNOWN': 3,
                }
 
-class Job(object):
 
-    def __init__(self, name, cmd=[]):
+class Job(object):
+    """
+    Representation of an execution of a job.
+    """
+
+    def __init__(self, name, cmd=None):
+        if cmd is None:
+            cmd = []
         for x in cmd:
             assert(isinstance(x, basestring))
         self._name = name
@@ -282,8 +288,27 @@ class Job(object):
 
 
 class Check(object):
+    """
+    Conditions for the 'check' command. Loaded from file (one file per job name),
+    and used to check if a Job instance is OK or WARNING or ...
+    """
 
     def __init__(self, filename, logger):
+        """
+        Load check criteria from a file.
+
+        Example file contents:
+
+            [check]
+            ok = exit_status=0, max_age=8h
+            warning = exit_status=0, max_age=24h
+
+        @param filename: INI file with check criterias for a specific job
+        @param logger: logging logger
+
+        @type filename: string
+        @type logger: logging.logger
+        """
         self.logger = logger
         self.config = ConfigParser.ConfigParser(_check_defaults)
         if not self.config.read([filename]):
@@ -293,6 +318,13 @@ class Check(object):
         self._warning_criteria = [x.strip() for x in self.config.get(_section, 'warning').split(',')]
 
     def job_is_ok(self, job):
+        """
+        Evaluate a Job against the OK criterias for this check.
+
+        @type job: Job
+
+        @rtype: bool
+        """
         res = True
         for this in self._ok_criteria:
             if not self._evaluate(this, job):
@@ -302,6 +334,13 @@ class Check(object):
         return res
 
     def job_is_warning(self, job):
+        """
+        Evaluate a Job against the WARNING criterias for this check.
+
+        @type job: Job
+
+        @rtype: bool
+        """
         res = True
         for this in self._warning_criteria:
             if not self._evaluate(this, job):
@@ -311,6 +350,15 @@ class Check(object):
         return res
 
     def _evaluate(self, criteria, job):
+        """
+        The actual evaluation engine.
+
+        @param criteria: The criteria to test ('max_age=8h' for example)
+        @param job: The job
+
+        @type criteria: string
+        @type job: Job
+        """
         (what, value) = criteria.split('=')
         what.strip()
         value.strip()
@@ -401,6 +449,12 @@ def parse_args(defaults):
 
 
 def mode_wrap(args, logger):
+    """
+    Execute a job and save result state in a file.
+
+    @param args: Parsed command line arguments
+    @param logger: logging logger
+    """
     job = Job(args.name, cmd=args.cmd)
     logger.debug("Invoking '{!s}'".format(''.join(args.cmd)))
     job.run()
@@ -411,6 +465,12 @@ def mode_wrap(args, logger):
 
 
 def mode_ls(args, logger):
+    """
+    List all the saved states for jobs.
+
+    @param args: Parsed command line arguments
+    @param logger: logging logger
+    """
     jobs = _get_job_results(args, logger)
     for this in sorted(jobs, key=lambda x: x.start_time):
         start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
@@ -425,6 +485,15 @@ def mode_ls(args, logger):
 
 
 def mode_check(args, logger):
+    """
+    Evaluate the stored states for either a specific job, or all jobs.
+
+    Return Nagios compatible output (scriptherder --mode check is intended to
+                                     run using Nagios NRPE or similar).
+
+    @param args: Parsed command line arguments
+    @param logger: logging logger
+    """
     jobs = _get_job_results(args, logger)
 
     # group the jobs by their name
@@ -508,6 +577,14 @@ def mode_check(args, logger):
 
 
 def _get_job_results(args, logger):
+    """
+    Load all jobs matching any specified name on the command line.
+
+    @param args: Parsed command line arguments
+    @param logger: logging logger
+
+    @rtype: [Job]
+    """
     files = [f for f in os.listdir(args.datadir) if os.path.isfile(os.path.join(args.datadir, f))]
     jobs = []
     for this in files:
@@ -520,7 +597,17 @@ def _get_job_results(args, logger):
         jobs.append(job)
     return jobs
 
+
 def _parse_time_value(value):
+    """
+    Parse time period strings such as 1d. A lone number is considered number of seconds.
+
+    Return parsed value as number of seconds.
+
+    @param value: Value to parse
+    @type value: string
+    @rtype: int
+    """
     match = re.match('^(\d+)([hmsd]*)$', value)
     if match:
         num = int(match.group(1))
@@ -532,6 +619,7 @@ def _parse_time_value(value):
         if what == 'd':
             return num * 86400
         return num
+
 
 def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):
     """
