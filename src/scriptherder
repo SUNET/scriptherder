@@ -170,7 +170,7 @@ class Job(object):
         if duration < 1:
             # milliseconds
             return '{:0.3f}ms'.format(duration * 1000)
-        return '{!s}s'.format(duration)
+        return '{:0.3f}s'.format(duration)
 
     @property
     def exit_status(self):
@@ -476,7 +476,7 @@ def mode_ls(args, logger):
         start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
         print('{start}  {duration:>6}  exit={exit}  name={name}   {filename}'.format(
             start = start,
-            duration = this.duration,
+            duration = this.duration_str,
             exit = this.exit_status,
             name = this.name,
             filename = this.filename,
@@ -588,6 +588,8 @@ def _get_job_results(args, logger):
     files = [f for f in os.listdir(args.datadir) if os.path.isfile(os.path.join(args.datadir, f))]
     jobs = []
     for this in files:
+        if this.startswith('.'):
+            continue
         filename = os.path.join(args.datadir, this)
         job = job_from_file(filename)
         if args.cmd:
