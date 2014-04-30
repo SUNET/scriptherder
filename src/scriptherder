@@ -86,6 +86,7 @@ class Job(object):
         self._pid = None
         self._output = None
         self._filename = None
+        self._output_filename = None
         if self._name is None:
             self._name = os.path.basename(self.cmd)
 
@@ -206,7 +207,20 @@ class Job(object):
 
         @rtype: [string]
         """
+        if not self._output and self.output_filename:
+            f = open(self.output_filename, 'r')
+            self._output = f.read()
+            f.close()
         return self._output
+
+    @property
+    def output_filename(self):
+        """
+        The name of the file holding the output (STDOUT and STDERR) of the script invocation.
+
+        @rtype: [string]
+        """
+        return self._output_filename
 
     def run(self):
         """
@@ -225,14 +239,16 @@ class Job(object):
         self._exit_status = proc.returncode
         self._pid = proc.pid
 
-    def save_to_file(self, datadir, filename=None):
+    def save_to_file(self, datadir, logger, filename=None):
         """
         Create a record with the details of a script invocation.
 
         @param datadir: Directory to keep records in
+        @param logger: logging logger
         @param filename: Filename to use - default is reasonably constructed
 
         @type datadir: string
+        @type logger: logging.logger
         @type filename: string or None
         """
         if filename is None:
@@ -244,6 +260,8 @@ class Job(object):
                     fn += '_'
             filename = '{!s}_{!s}_{!s}'.format(fn, self.start_time, self.pid)
         fn = os.path.join(datadir, filename)
+        logger.debug("Saving job metadata to file {!r}.tmp".format(fn))
+        output_fn = fn + '_output'
         f = open(fn + '.tmp', 'w')
         data = {'name': self.name,
                 'cmd': self._cmd,
@@ -251,14 +269,22 @@ class Job(object):
                 'end_time': self._end_time,
                 'pid': self.pid,
                 'exit_status': self.exit_status,
-                'output': self.output,    # XXX compress really large output?
-                'version': 1,
+                'output_filename': output_fn + '.data',
+                'version': 2,
                 }
         f.write(json.dumps(data, indent = 4, sort_keys = True))
         f.write('\n')
         f.close()
-        os.rename(fn + '.tmp', fn)
-        self._filename = filename
+        os.rename(fn + '.tmp', fn + '.json')
+        self._filename = fn
+
+        if self._output:
+            logger.debug("Saving job output to file {!r}".format(output_fn))
+            f = open(output_fn + '.tmp', 'w')
+            f.write(self._output)
+            f.close()
+            os.rename(output_fn + '.tmp', output_fn + '.data')
+            self._output_filename = output_fn
 
     def from_file(self, filename):
         """
@@ -273,17 +299,31 @@ class Job(object):
         f = open(filename, 'r')
         data = json.loads(f.read(100 * 1024 * 1024))
         f.close()
-        assert data['version'] == 1
-        self._name = data.get('name')
-        for x in data['cmd']:
-            assert(isinstance(x, basestring))
-        self._cmd = data['cmd']
-        self._start_time = data['start_time']
-        self._end_time = data['end_time']
-        self._pid = data['pid']
-        self._exit_status = data['exit_status']
-        self._output = data['output']
-        self._filename = filename
+        if data.get('version') == 1:
+            self._name = data.get('name')
+            for x in data['cmd']:
+                assert(isinstance(x, basestring))
+            self._cmd = data['cmd']
+            self._start_time = data['start_time']
+            self._end_time = data['end_time']
+            self._pid = data['pid']
+            self._exit_status = data['exit_status']
+            self._output = data['output']
+            self._output_filename = None
+            self._filename = filename
+        elif data.get('version') == 2:
+            self._name = data.get('name')
+            for x in data['cmd']:
+                assert(isinstance(x, basestring))
+            self._cmd = data['cmd']
+            self._start_time = data['start_time']
+            self._end_time = data['end_time']
+            self._pid = data['pid']
+            self._exit_status = data['exit_status']
+            self._output_filename = data['output_filename']
+            self._filename = filename
+        else:
+            raise AssertionError('Unknown version in file {!r}: {!r}'.format(filename, data.get('version')))
         return self
 
 
@@ -460,7 +500,7 @@ def mode_wrap(args, logger):
     job.run()
     logger.debug("Finished, exit status {!r}".format(job.exit_status))
     logger.debug("Job output:\n{!s}".format(job.output))
-    job.save_to_file(args.datadir)
+    job.save_to_file(args.datadir, logger)
     return True
 
 
@@ -588,7 +628,7 @@ def _get_job_results(args, logger):
     files = [f for f in os.listdir(args.datadir) if os.path.isfile(os.path.join(args.datadir, f))]
     jobs = []
     for this in files:
-        if this.startswith('.'):
+        if not this.endswith('.json'):
             continue
         filename = os.path.join(args.datadir, this)
         job = job_from_file(filename)
