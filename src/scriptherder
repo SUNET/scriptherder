@@ -269,9 +269,11 @@ class Job(object):
                 'end_time': self._end_time,
                 'pid': self.pid,
                 'exit_status': self.exit_status,
-                'output_filename': output_fn + '.data',
                 'version': 2,
                 }
+        if self._output:
+            data['output_filename'] = output_fn + '.data'
+            data['output_size'] = len(self._output)
         f.write(json.dumps(data, indent = 4, sort_keys = True))
         f.write('\n')
         f.close()
@@ -320,7 +322,8 @@ class Job(object):
             self._end_time = data['end_time']
             self._pid = data['pid']
             self._exit_status = data['exit_status']
-            self._output_filename = data['output_filename']
+            self._output_filename = data.get('output_filename')
+            #self._output_size = data.get('output_size')  # currently not used in scriptherder
             self._filename = filename
         else:
             raise AssertionError('Unknown version in file {!r}: {!r}'.format(filename, data.get('version')))
