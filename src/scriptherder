@@ -557,7 +557,12 @@ def mode_check(args, logger):
         # Load the evaluation criterias for this job
         check_filename = os.path.join(args.checkdir, name + '.ini')
         logger.debug("Loading check definition from {!r}".format(check_filename))
-        check = Check(check_filename, logger)
+        try:
+            check = Check(check_filename, logger)
+        except ValueError as exc:
+            logger.warning("Failed loading check: {!r}".format(exc), exc_info=True)
+            print("UNKNOWN: Failed loading check from file {!r}".format(check_filename))
+            return exit_status['UNKNOWN']
         logger.debug("Checking {!r}: {!r}".format(name, jobs))
 
         jobs_ok = []
