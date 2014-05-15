@@ -1,1 +1,31 @@
 Wrapper to keep track of status/output/etc. of cron jobs
+
+Quick instructions, more will follow later:
+
+Example wrapping of a script run from cron:
+
+  */15 * * * *   root   scriptherder --mode wrap --syslog --name my_job -- /usr/local/bin/my_job -v
+
+Nagios NRPE checks. One specific for my_job and one catch-all:
+
+  command[check_scripts]=/usr/local/bin/scriptherder --mode check
+  command[check_cosmos]=/usr/local/bin/scriptherder --mode check my_job
+
+To manually inspect the entrys in the 'database':
+
+  $ scriptherder
+
+Don't forget to add a cronjob to clean out old entries from the 'database':
+
+  # cat /etc/cron.daily/scriptherder_cleanup
+  #!/bin/sh
+  #
+  # Remove scriptherder data older than 7 days.
+  #
+
+  DIR="/var/cache/scriptherder/"
+
+  test -d ${DIR} || exit 0
+
+  find ${DIR} -type f -mtime +7 -print0 | xargs -0 rm -f
+  #
