@@ -422,6 +422,83 @@ class Check(object):
         return False
 
 
+class JobLoadError(Exception):
+    """
+    Raised when loading a job file fails.
+    """
+    def __init__(self, filename):
+        self.filename = filename
+
+
+class CheckStatus(object):
+    """
+    Aggregated status of job invocations for --mode check.
+
+    Attributes:
+
+      checks_ok: List of checks in OK state ([Job()]).
+      checks_warning: List of checks in WARNING state ([Job()]).
+      checks_critical: List of checks in CRITICAL state ([Job()]).
+    """
+
+    def __init__(self, args, logger):
+        """
+        @param args: Parsed command line arguments
+        @param logger: logging logger
+        """
+
+        self.checks_ok = []
+        self.checks_warning = []
+        self.checks_critical = []
+
+        jobs = _get_job_results(args, logger)
+
+        # group the jobs by their name
+        by_name = {}
+        for this in jobs:
+            if this.name not in by_name:
+                by_name[this.name] = []
+            by_name[this.name].append(this)
+
+        # determine total check status based on all logged invocations of this job
+        for (name, jobs) in by_name.items():
+            # Load the evaluation criterias for this job
+            check_filename = os.path.join(args.checkdir, name + '.ini')
+            logger.debug("Loading check definition from {!r}".format(check_filename))
+            try:
+                check = Check(check_filename, logger)
+            except ValueError as exc:
+                logger.warning("Failed loading check: {!r}".format(exc), exc_info=True)
+                raise JobLoadError(filename = check_filename)
+
+            # Sort jobs, oldest first
+            jobs = sorted(jobs, key=lambda x: x.start_time)
+            logger.debug("Checking {!r}: {!r}".format(name, jobs))
+
+            jobs_ok = []
+            jobs_warning = []
+            jobs_critical = []
+            for job in jobs:
+                if check.job_is_ok(job):
+                    jobs_ok.append(job)
+                elif check.job_is_warning(job):
+                    jobs_warning.append(job)
+                else:
+                    jobs_critical.append(job)
+
+            logger.debug("Raw status OK      : {!r}".format(jobs_ok))
+            logger.debug("Raw status WARN    : {!r}".format(jobs_warning))
+            logger.debug("Raw status CRITICAL: {!r}".format(jobs_critical))
+
+            # add most recent job status to the totals
+            if jobs_ok:
+                self.checks_ok.append(jobs_ok[-1])
+            elif jobs_warning:
+                self.checks_warning.append(jobs_warning[-1])
+            else:
+                self.checks_critical.append(jobs_critical[-1])
+
+
 def job_from_file(filename):
     """
     Recreate Job() instance from saved file.
@@ -537,87 +614,46 @@ def mode_check(args, logger):
     @param args: Parsed command line arguments
     @param logger: logging logger
     """
-    jobs = _get_job_results(args, logger)
 
-    # group the jobs by their name
-    by_name = {}
-    for this in jobs:
-        if this.name not in by_name:
-            by_name[this.name] = []
-        by_name[this.name].append(this)
-
-    total_ok = []
-    total_warning = []
-    total_critical = []
-
-    # determine total check status based on all logged invocations of this job
-    for (name, jobs) in by_name.items():
-        # Sort jobs, oldest first
-        jobs = sorted(jobs, key=lambda x: x.start_time)
-        # Load the evaluation criterias for this job
-        check_filename = os.path.join(args.checkdir, name + '.ini')
-        logger.debug("Loading check definition from {!r}".format(check_filename))
-        try:
-            check = Check(check_filename, logger)
-        except ValueError as exc:
-            logger.warning("Failed loading check: {!r}".format(exc), exc_info=True)
-            print("UNKNOWN: Failed loading check from file {!r}".format(check_filename))
-            return exit_status['UNKNOWN']
-        logger.debug("Checking {!r}: {!r}".format(name, jobs))
-
-        jobs_ok = []
-        jobs_warning = []
-        jobs_critical = []
-        for job in jobs:
-            if check.job_is_ok(job):
-                jobs_ok.append(job)
-            elif check.job_is_warning(job):
-                jobs_warning.append(job)
-            else:
-                jobs_critical.append(job)
-        logger.debug("Raw status OK      : {!r}".format(jobs_ok))
-        logger.debug("Raw status WARN    : {!r}".format(jobs_warning))
-        logger.debug("Raw status CRITICAL: {!r}".format(jobs_critical))
-        if jobs_ok:
-            total_ok.append(jobs_ok[-1])
-        elif jobs_warning:
-            total_warning.append(jobs_warning[-1])
-        else:
-            total_critical.append(jobs_critical[-1])
+    try:
+        status = CheckStatus(args, logger)
+    except JobLoadError as exc:
+        print("UNKNOWN: Failed loading check from file '{!s}'".format(exc.filename))
+        return exit_status['UNKNOWN']
 
     if args.cmd:
         # Single job check requested, output detailed information
-        if total_ok:
-            print('OK: {!s}'.format(total_ok[-1]))
+        if status.checks_ok:
+            print('OK: {!s}'.format(status.checks_ok[-1]))
             return exit_status['OK']
-        if total_warning:
-            print('WARNING: {!s}'.format(total_warning[-1]))
+        if status.checks_warning:
+            print('WARNING: {!s}'.format(status.checks_warning[-1]))
             return exit_status['WARNING']
-        if total_critical:
-            print('CRITICAL: {!s}'.format(total_critical[-1]))
+        if status.checks_critical:
+            print('CRITICAL: {!s}'.format(status.checks_critical[-1]))
             return exit_status['CRITICAL']
         print "UNKNOWN - no jobs found for {!r}?".format(args.cmd)
         return exit_status['UNKNOWN']
 
-    # When not looking at multiple jobs at once, logic gets a bit reversed - if ANY
+    # When looking at multiple jobs at once, logic gets a bit reversed - if ANY
     # job invocation is CRITICAL/WARNING, the aggregate message given to
     # Nagios will have to be a failure.
-    if total_critical:
+    if status.checks_critical:
         print("CRITICAL: {num} job(s) in this state: {names}".format(
-            num = len(total_critical),
-            names = ', '.join([str(x.name) for x in total_critical]),
+            num = len(status.checks_critical),
+            names = ', '.join([str(x.name) for x in status.checks_critical]),
             ))
         return exit_status['CRITICAL']
-    if total_warning:
+    if status.checks_warning:
         print("WARNING: {num} job(s) in this state: {names}".format(
-            num = len(total_warning),
-            names = ', '.join([str(x.name) for x in total_warning]),
+            num = len(status.checks_warning),
+            names = ', '.join([str(x.name) for x in status.checks_warning]),
             ))
         return exit_status['WARNING']
-    if total_ok:
+    if status.checks_ok:
         print("OK: {num} job(s) in this state: {names}".format(
-            num = len(total_ok),
-            names = ', '.join([x.name for x in total_ok]),
+            num = len(status.checks_ok),
+            names = ', '.join([x.name for x in status.checks_ok]),
             ))
         return exit_status['OK']
     print "UNKNOWN - no jobs found?"
