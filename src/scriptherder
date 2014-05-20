@@ -68,6 +68,28 @@ exit_status = {'OK': 0,
                }
 
 
+class ScriptHerderError(Exception):
+    """
+    Base exception class for scriptherder.
+    """
+
+    def __init__(self, reason, filename):
+        self.reason = reason
+        self.filename = filename
+
+
+class JobLoadError(ScriptHerderError):
+    """
+    Raised when loading a job file fails.
+    """
+
+
+class CheckLoadError(ScriptHerderError):
+    """
+    Raised when loading a check file fails.
+    """
+
+
 class Job(object):
     """
     Representation of an execution of a job.
@@ -326,7 +348,7 @@ class Job(object):
             #self._output_size = data.get('output_size')  # currently not used in scriptherder
             self._filename = filename
         else:
-            raise AssertionError('Unknown version in file {!r}: {!r}'.format(filename, data.get('version')))
+            raise JobLoadError('Unknown version: {!r}'.format(data.get('version')), filename=filename)
         return self
 
 
@@ -355,7 +377,7 @@ class Check(object):
         self.logger = logger
         self.config = ConfigParser.ConfigParser(_check_defaults)
         if not self.config.read([filename]):
-            raise ValueError("Failed loading config file {!r}".format(filename))
+            raise ScriptHerderError('Failed loading config file', filename)
         _section = 'check'
         self._ok_criteria = [x.strip() for x in self.config.get(_section, 'ok').split(',')]
         self._warning_criteria = [x.strip() for x in self.config.get(_section, 'warning').split(',')]
@@ -422,14 +444,6 @@ class Check(object):
         return False
 
 
-class JobLoadError(Exception):
-    """
-    Raised when loading a job file fails.
-    """
-    def __init__(self, filename):
-        self.filename = filename
-
-
 class CheckStatus(object):
     """
     Aggregated status of job invocations for --mode check.
@@ -451,17 +465,30 @@ class CheckStatus(object):
         self.checks_warning = []
         self.checks_critical = []
 
-        jobs = _get_job_results(args, logger)
-
+        self._jobs = _get_job_results(args, logger)
         # group the jobs by their name
-        by_name = {}
-        for this in jobs:
-            if this.name not in by_name:
-                by_name[this.name] = []
-            by_name[this.name].append(this)
+        _by_name = {}
+        for this in self._jobs:
+            if this.name not in _by_name:
+                _by_name[this.name] = []
+            _by_name[this.name].append(this)
+        self._jobs_by_name = _by_name
 
+        self._check_running_jobs(args, logger)
+        self._check_not_running(args, logger)
+
+    def _check_running_jobs(self, args, logger):
+        """
+        Look for job execution entrys (parsed into Job() instances), group them
+        per check name and determine the status. For each group, append status
+        to one of the three aggregate status lists of this object (checks_ok,
+        checks_warning or checks_critical).
+
+        @param args: Parsed command line arguments
+        @param logger: logging logger
+        """
         # determine total check status based on all logged invocations of this job
-        for (name, jobs) in by_name.items():
+        for (name, jobs) in self._jobs_by_name.items():
             # Load the evaluation criterias for this job
             check_filename = os.path.join(args.checkdir, name + '.ini')
             logger.debug("Loading check definition from {!r}".format(check_filename))
@@ -469,7 +496,7 @@ class CheckStatus(object):
                 check = Check(check_filename, logger)
             except ValueError as exc:
                 logger.warning("Failed loading check: {!r}".format(exc), exc_info=True)
-                raise JobLoadError(filename = check_filename)
+                raise CheckLoadError(filename = check_filename)
 
             # Sort jobs, oldest first
             jobs = sorted(jobs, key=lambda x: x.start_time)
@@ -497,6 +524,17 @@ class CheckStatus(object):
                 self.checks_warning.append(jobs_warning[-1])
             else:
                 self.checks_critical.append(jobs_critical[-1])
+
+    def _check_not_running(self, args, logger):
+        """
+        Look for job execution entrys (parsed into Job() instances), group them
+        per check name and determine the status. For each group, append status
+        to one of the three aggregate status lists of this object (checks_ok,
+        checks_warning or checks_critical).
+
+        @param args: Parsed command line arguments
+        @param logger: logging logger
+        """
 
 
 def job_from_file(filename):
@@ -617,8 +655,8 @@ def mode_check(args, logger):
 
     try:
         status = CheckStatus(args, logger)
-    except JobLoadError as exc:
-        print("UNKNOWN: Failed loading check from file '{!s}'".format(exc.filename))
+    except CheckLoadError as exc:
+        print("UNKNOWN: Failed loading check from file '{!s}' ({!s})".format(exc.filename, exc.reason))
         return exit_status['UNKNOWN']
 
     if args.cmd:
@@ -675,7 +713,10 @@ def _get_job_results(args, logger):
         if not this.endswith('.json'):
             continue
         filename = os.path.join(args.datadir, this)
-        job = job_from_file(filename)
+        try:
+            job = job_from_file(filename)
+        except JobLoadError as exc:
+            logger.warning("Failed loading job file '{!s}' ({!s})".format(exc.filename, exc.reason))
         if args.cmd:
             if args.cmd[0] != job.name:
                 logger.debug("Skipping '{!s}' not matching '{!s}' (file {!s})".format(job.name, args.cmd[0], filename))
