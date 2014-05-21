@@ -131,6 +131,21 @@ class Job(object):
             exit = self.exit_status,
         )
 
+    def status_summary(self):
+        """
+        Return short string with status of job.
+
+        E.g. 'name[exit=0,age=19h]'
+        """
+        if self._end_time is None or self._start_time is None:
+            return '{name}[not_running]'.format(name = self.name)
+        age = _time_to_str(time.time() - self._start_time)
+        return '{name}[exit={exit_status},age={age}]'.format(
+            name = self.name,
+            exit_status = self._exit_status,
+            age = age,
+            )
+
     @property
     def name(self):
         """
@@ -192,10 +207,7 @@ class Job(object):
         if self._end_time is None or self._start_time is None:
             return 'NaN'
         duration = self._end_time - self._start_time
-        if duration < 1:
-            # milliseconds
-            return '{:0.3f}ms'.format(duration * 1000)
-        return '{:0.3f}s'.format(duration)
+        return _time_to_str(duration)
 
     @property
     def exit_status(self):
@@ -476,6 +488,8 @@ class CheckStatus(object):
             _by_name[this.name].append(this)
         self._jobs_by_name = _by_name
 
+        self._job_count = len(_by_name)
+
         self._check_running_jobs(args, logger)
         if not args.cmd:
             self._check_not_running(args, logger)
@@ -497,9 +511,9 @@ class CheckStatus(object):
             logger.debug("Loading check definition from {!r}".format(check_filename))
             try:
                 check = Check(check_filename, logger)
-            except ValueError as exc:
+            except ScriptHerderError as exc:
                 logger.warning("Failed loading check: {!r}".format(exc), exc_info=True)
-                raise CheckLoadError(filename = check_filename)
+                raise CheckLoadError('Failed loading check', filename = check_filename)
 
             # Sort jobs, oldest first
             jobs = sorted(jobs, key=lambda x: x.start_time)
@@ -555,8 +569,17 @@ class CheckStatus(object):
                 logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
                 job = Job(name=name)
                 self.checks_critical.append(job)
+                self._job_count += 1
             else:
                 logger.debug('Check {!r} has {!r} logged results'.format(name, len(self._jobs_by_name[name])))
+
+    def num_jobs(self):
+        """
+        Return number of jobs processed. This is number of different jobs running + not running.
+
+        @rtype: int
+        """
+        return self._job_count
 
 
 def job_from_file(filename):
@@ -700,25 +723,34 @@ def mode_check(args, logger):
     # job invocation is CRITICAL/WARNING, the aggregate message given to
     # Nagios will have to be a failure.
     if status.checks_critical:
-        print("CRITICAL: {num} job(s) in this state: {names}".format(
-            num = len(status.checks_critical),
-            names = ', '.join(sorted([str(x.name) for x in status.checks_critical])),
-            ))
+        print('CRITICAL: {!s}'.format(
+            _status_summary(status.num_jobs(), status.checks_critical)))
         return exit_status['CRITICAL']
     if status.checks_warning:
-        print("WARNING: {num} job(s) in this state: {names}".format(
-            num = len(status.checks_warning),
-            names = ', '.join(sorted([str(x.name) for x in status.checks_warning])),
-            ))
+        print('WARNING: {!s}'.format(
+            _status_summary(status.num_jobs(), status.checks_warning)))
         return exit_status['WARNING']
     if status.checks_ok:
-        print("OK: {num} job(s) in this state: {names}".format(
-            num = len(status.checks_ok),
-            names = ', '.join(sorted([x.name for x in status.checks_ok])),
-            ))
+        print('OK: {!s}'.format(
+            _status_summary(status.num_jobs(), status.checks_ok)))
         return exit_status['OK']
     print "UNKNOWN - no jobs found?"
     return exit_status['UNKNOWN']
+
+
+def _status_summary(num_jobs, failed):
+    """
+    String format routine used in output of checks status.
+    """
+    fmt = '1 job in this state: {summary}'
+    if len(failed) == 1:
+        fmt = '{jobs}/{num_jobs} job in this state: {summary}'
+
+    summary = ', '.join(sorted([str(x.status_summary()) for x in failed]))
+    return fmt.format(jobs = len(failed),
+                      num_jobs = num_jobs,
+                      summary = summary,
+                      )
 
 
 def _get_job_results(args, logger):
@@ -769,6 +801,27 @@ def _parse_time_value(value):
         if what == 'd':
             return num * 86400
         return num
+
+
+def _time_to_str(value):
+    """
+    Format number of seconds to short readable string.
+
+    @type value: float or int
+
+    @rtype: string
+    """
+    if value < 1:
+        # milliseconds
+        return '{:0.3f}ms'.format(value * 1000)
+    if value < 60:
+        return '{!s}s'.format(int(value))
+    if value < 3600:
+        return '{!s}m'.format(int(value))
+    if value < 86400:
+        return '{!s}h'.format(int(value / 3600))
+    days = int(value / 86400)
+    return '{!s}d{!s}h'.format(days, int((value % 86400) / 3600))
 
 
 def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):
