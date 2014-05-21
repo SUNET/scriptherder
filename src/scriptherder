@@ -189,6 +189,8 @@ class Job(object):
 
         @rtype: string
         """
+        if self._end_time is None or self._start_time is None:
+            return 'NaN'
         duration = self._end_time - self._start_time
         if duration < 1:
             # milliseconds
@@ -475,7 +477,8 @@ class CheckStatus(object):
         self._jobs_by_name = _by_name
 
         self._check_running_jobs(args, logger)
-        self._check_not_running(args, logger)
+        if not args.cmd:
+            self._check_not_running(args, logger)
 
     def _check_running_jobs(self, args, logger):
         """
@@ -535,6 +538,25 @@ class CheckStatus(object):
         @param args: Parsed command line arguments
         @param logger: logging logger
         """
+        files = [f for f in os.listdir(args.checkdir) if os.path.isfile(os.path.join(args.checkdir, f))]
+        for this in files:
+            if not this.endswith('.ini'):
+                continue
+            filename = os.path.join(args.checkdir, this)
+            logger.debug("Loading check definition from {!r}".format(filename))
+            try:
+                # validate check loads
+                Check(filename, logger)
+            except ValueError as exc:
+                logger.warning("Failed loading check: {!r}".format(exc), exc_info=True)
+                raise CheckLoadError(filename = filename)
+            name = this[:-4]  # remove the '.ini' suffix
+            if name not in self._jobs_by_name:
+                logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
+                job = Job(name=name)
+                self.checks_critical.append(job)
+            else:
+                logger.debug('Check {!r} has {!r} logged results'.format(name, len(self._jobs_by_name[name])))
 
 
 def job_from_file(filename):
@@ -603,6 +625,7 @@ def parse_args(defaults):
                         )
 
     args = parser.parse_args()
+
     return args
 
 
@@ -764,6 +787,10 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
     """
     if not args:
         args = parse_args(defaults)
+
+    if args.name and args.mode is not 'check':
+        logger.error('Argument --name only applicable for --mode check')
+        return False
 
     # initialize various components
     if not logger:
