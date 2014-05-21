@@ -788,10 +788,6 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
     if not args:
         args = parse_args(defaults)
 
-    if args.name and args.mode is not 'wrap':
-        logger.error('Argument --name only applicable for --mode wrap')
-        return False
-
     # initialize various components
     if not logger:
         logger = logging.getLogger(myname)
@@ -807,6 +803,10 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
         formatter = logging.Formatter('%(name)s: %(levelname)s %(message)s')
         syslog_h.setFormatter(formatter)
         logger.addHandler(syslog_h)
+
+    if args.name and args.mode != 'wrap':
+        logger.error('Argument --name only applicable for --mode wrap')
+        return False
 
     if args.mode == 'wrap':
         return mode_wrap(args, logger)
