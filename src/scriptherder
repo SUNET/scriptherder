@@ -702,19 +702,19 @@ def mode_check(args, logger):
     if status.checks_critical:
         print("CRITICAL: {num} job(s) in this state: {names}".format(
             num = len(status.checks_critical),
-            names = ', '.join([str(x.name) for x in status.checks_critical]),
+            names = ', '.join(sorted([str(x.name) for x in status.checks_critical])),
             ))
         return exit_status['CRITICAL']
     if status.checks_warning:
         print("WARNING: {num} job(s) in this state: {names}".format(
             num = len(status.checks_warning),
-            names = ', '.join([str(x.name) for x in status.checks_warning]),
+            names = ', '.join(sorted([str(x.name) for x in status.checks_warning])),
             ))
         return exit_status['WARNING']
     if status.checks_ok:
         print("OK: {num} job(s) in this state: {names}".format(
             num = len(status.checks_ok),
-            names = ', '.join([x.name for x in status.checks_ok]),
+            names = ', '.join(sorted([x.name for x in status.checks_ok])),
             ))
         return exit_status['OK']
     print "UNKNOWN - no jobs found?"
