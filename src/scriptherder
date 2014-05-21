@@ -788,8 +788,8 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
     if not args:
         args = parse_args(defaults)
 
-    if args.name and args.mode is not 'check':
-        logger.error('Argument --name only applicable for --mode check')
+    if args.name and args.mode is not 'wrap':
+        logger.error('Argument --name only applicable for --mode wrap')
         return False
 
     # initialize various components
