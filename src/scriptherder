@@ -742,7 +742,7 @@ def _status_summary(num_jobs, failed):
     """
     String format routine used in output of checks status.
     """
-    fmt = '1 job in this state: {summary}'
+    fmt = '{jobs} job in this state: {summary}'
     if len(failed) == 1:
         fmt = '{jobs}/{num_jobs} job in this state: {summary}'
 
