@@ -817,7 +817,7 @@ def _time_to_str(value):
     if value < 60:
         return '{!s}s'.format(int(value))
     if value < 3600:
-        return '{!s}m'.format(int(value))
+        return '{!s}m'.format(int(value / 60))
     if value < 86400:
         return '{!s}h'.format(int(value / 3600))
     days = int(value / 86400)
