@@ -620,7 +620,7 @@ def parse_args(defaults):
                         )
     parser.add_argument('--mode',
                         dest = 'mode',
-                        choices = ['wrap', 'ls', 'check'], default = defaults['mode'],
+                        choices = ['wrap', 'ls', 'check', 'lastlog'], default = defaults['mode'],
                         help = 'What mode to run in',
                         )
     parser.add_argument('-d', '--datadir',
@@ -736,6 +736,36 @@ def mode_check(args, logger):
         return exit_status['OK']
     print "UNKNOWN - no jobs found?"
     return exit_status['UNKNOWN']
+
+
+def mode_lastlog(args, logger):
+    """
+    View script output for the last execution for either a specific
+    job, or all jobs.
+
+    @param args: Parsed command line arguments
+    @param logger: logging logger
+    """
+    _jobs = sorted(_get_job_results(args, logger), key=lambda x: x.start_time)
+    jobs_by_name = {}
+    for job in _jobs:
+        if job.name not in jobs_by_name:
+            jobs_by_name[job.name] = []
+        jobs_by_name[job.name].append(job)
+
+    if len(jobs_by_name) > 0:
+        if args.cmd and args.cmd[0] in jobs_by_name:
+            last_job = jobs_by_name[args.cmd[0]][-1]
+            if last_job.output_filename:
+                subprocess.call(['less', last_job.output_filename])
+            else:
+                print('No script output found for job {!s}'.format(last_job.name))
+        else:
+            for (name, jobs) in jobs_by_name.items():
+                if jobs[-1].output_filename:
+                    subprocess.call(['less', jobs[-1].output_filename])
+    else:
+        print "No jobs found"
 
 
 def _status_summary(num_jobs, failed):
@@ -867,6 +897,8 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
         return mode_ls(args, logger)
     elif args.mode == 'check':
         return mode_check(args, logger)
+    elif args.mode == 'lastlog':
+        return mode_lastlog(args, logger)
     else:
         logger.error("Invalid mode {!r}".format(args.mode))
         return False
