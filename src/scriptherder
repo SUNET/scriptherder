@@ -42,6 +42,7 @@ Scriptherder can be run in one othe following modes:
 import os
 import re
 import sys
+import shutil
 import time
 import json
 import logging
@@ -620,7 +621,7 @@ def parse_args(defaults):
                         )
     parser.add_argument('--mode',
                         dest = 'mode',
-                        choices = ['wrap', 'ls', 'check', 'lastlog'], default = defaults['mode'],
+                        choices = ['wrap', 'ls', 'check', 'lastlog', 'lastfaillog'], default = defaults['mode'],
                         help = 'What mode to run in',
                         )
     parser.add_argument('-d', '--datadir',
@@ -738,7 +739,7 @@ def mode_check(args, logger):
     return exit_status['UNKNOWN']
 
 
-def mode_lastlog(args, logger):
+def mode_lastlog(args, logger, fail_status=False):
     """
     View script output for the last execution for either a specific
     job, or all jobs.
@@ -754,16 +755,25 @@ def mode_lastlog(args, logger):
         jobs_by_name[job.name].append(job)
 
     if len(jobs_by_name) > 0:
-        if args.cmd and args.cmd[0] in jobs_by_name:
-            last_job = jobs_by_name[args.cmd[0]][-1]
-            if last_job.output_filename:
-                subprocess.call(['less', last_job.output_filename])
-            else:
-                print('No script output found for job {!s}'.format(last_job.name))
+        view_jobs = []
+        for (name, jobs) in jobs_by_name.items():
+            job = jobs[-1]  # last job (any status)
+            if job.output_filename:
+                if fail_status:
+                    if job.exit_status != 0:
+                        view_jobs.append(job)
+                else:
+                    view_jobs.append(job)
+
+        if view_jobs:
+            for job in view_jobs:
+                if os.path.isfile(job.output_filename):
+                    with open(job.output_filename, 'r') as f:
+                        print '=== Script output of {!r}'.format(job)
+                        shutil.copyfileobj(f, sys.stdout)
+                        print '=== End of script output\n'
         else:
-            for (name, jobs) in jobs_by_name.items():
-                if jobs[-1].output_filename:
-                    subprocess.call(['less', jobs[-1].output_filename])
+            print('No script output found for {!s} with fail_status={!s}'.format(', '.join(jobs_by_name.keys()), fail_status))
     else:
         print "No jobs found"
 
@@ -899,6 +909,8 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
         return mode_check(args, logger)
     elif args.mode == 'lastlog':
         return mode_lastlog(args, logger)
+    elif args.mode == 'lastfaillog':
+        return mode_lastlog(args, logger, fail_status=True)
     else:
         logger.error("Invalid mode {!r}".format(args.mode))
         return False
