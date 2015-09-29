@@ -829,7 +829,7 @@ def _parse_time_value(value):
     @type value: string
     @rtype: int
     """
-    match = re.match('^(\d+)([hmsd]*)$', value)
+    match = re.match(r'^(\d+)([hmsd]*)$', value)
     if match:
         num = int(match.group(1))
         what = match.group(2)
