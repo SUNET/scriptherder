@@ -455,6 +455,14 @@ class Check(object):
             self.logger.debug("Evaluate criteria {!r}: ({!r} > ({!r} - {!r}) {!r}".format(
                 criteria, job.end_time, now, value, res))
             return res
+        elif what == 'output_contains' or what == 'output_not_contains':
+            value = value.strip()
+            res = re.match(value, job.output) is not None
+            if what == 'output_not_contains':
+                res = not res  # invert result
+            self.logger.debug("Evaluate criteria {!r}: {!r} matching in {!s} bytes output: {!r}".format(
+                criteria, value, len(job.output), res))
+            return res
         self.logger.debug("Evaluation of unknown criteria {!r}, defaulting to False".format(criteria))
         return False
 
