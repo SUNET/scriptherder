@@ -761,7 +761,7 @@ def mode_lastlog(args, logger, fail_status=False):
             if job.output_filename:
                 if fail_status and job.exit_status != 0:
                     view_jobs.append(job)
-                else:
+                elif not fail_status:
                     view_jobs.append(job)
 
         if view_jobs:
