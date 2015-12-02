@@ -336,7 +336,10 @@ class Job(object):
         @rtype: Job
         """
         f = open(filename, 'r')
-        data = json.loads(f.read(100 * 1024 * 1024))
+        try:
+            data = json.loads(f.read(100 * 1024 * 1024))
+        except ValueError:
+            raise JobLoadError('JSON parsing failed', filename=filename)
         f.close()
         if data.get('version') == 1:
             self._name = data.get('name')
