@@ -148,20 +148,29 @@ class Job(object):
         self._data = data
 
     def __repr__(self):
-        start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
-        return '<{} instance at {:#x}: \'{name}\' start={start}, exit={exit}>'.format(
+        if self.end_time is None or self.start_time is None:
+            status = 'not_running'
+        else:
+            start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
+            status = 'start={start}, exit={exit}'.format(start = start,
+                                                         exit = self.exit_status,
+                                                         )
+        return '<{} instance at {:#x}: \'{name}\' {status}'.format(
             self.__class__.__name__,
             id(self),
             name=self.name,
-            start = start,
-            exit = self.exit_status,
+            status=status,
         )
 
     def __str__(self):
+        if self.end_time is None or self.start_time is None:
+            return '{!r} not_running'.format(self.name)
         start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
-        return '\'{name}\' start={start}, duration={duration:>6}, exit={exit}'.format(
+        age = _time_to_str(time.time() - self.start_time)
+        return '\'{name}\' start={start} ({age}), duration={duration}, exit={exit}'.format(
             name = self.name,
             start = start,
+            age = age,
             duration = self.duration_str,
             exit = self.exit_status,
         )
@@ -298,7 +307,7 @@ class Job(object):
         Run script, storing various aspects of the results.
         """
         self._start_time = time.time()
-        proc = subprocess.Popen(self._cmd,
+        proc = subprocess.Popen(self._data['cmd'],
                                 cwd='/',
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT,
@@ -533,7 +542,7 @@ class CheckStatus(object):
       checks_critical: List of checks in CRITICAL state ([Job()]).
     """
 
-    def __init__(self, args, logger):
+    def __init__(self, args, logger, jobs=None):
         """
         @param args: Parsed command line arguments
         @param logger: logging logger
@@ -543,44 +552,47 @@ class CheckStatus(object):
         self.checks_warning = []
         self.checks_critical = []
 
-        self._jobs = _get_job_results(args, logger)
+        self._checks = {}
+        self._args = args
+        self._logger = logger
+
+        self._jobs_by_name = None
+
+        if jobs is None:
+            jobs = _get_job_results(args, logger)
+        self.check_jobs(jobs)
+
+    def check_jobs(self, jobs, not_running=True):
         # group the jobs by their name
         _by_name = {}
-        for this in self._jobs:
+        for this in jobs:
             if this.name not in _by_name:
                 _by_name[this.name] = []
             _by_name[this.name].append(this)
         self._jobs_by_name = _by_name
 
-        self._job_count = len(_by_name)
+        self.checks_ok = []
+        self.checks_warning = []
+        self.checks_critical = []
 
-        self._check_running_jobs(args, logger)
-        if not args.cmd:
-            self._check_not_running(args, logger)
+        self._check_running_jobs()
+        if not_running and not self._args.cmd:
+            self._check_not_running()
 
-    def _check_running_jobs(self, args, logger):
+    def _check_running_jobs(self):
         """
         Look for job execution entrys (parsed into Job() instances), group them
         per check name and determine the status. For each group, append status
         to one of the three aggregate status lists of this object (checks_ok,
         checks_warning or checks_critical).
-
-        @param args: Parsed command line arguments
-        @param logger: logging logger
         """
         # determine total check status based on all logged invocations of this job
         for (name, jobs) in self._jobs_by_name.items():
-            # Load the evaluation criterias for this job
-            check_filename = os.path.join(args.checkdir, name + '.ini')
-            logger.debug("Loading check definition from {!r}".format(check_filename))
-            try:
-                check = Check(check_filename, logger)
-            except ScriptHerderError as exc:
-                raise CheckLoadError('Failed loading check', filename = check_filename)
+            check = self._get_check(name)
 
             # Sort jobs, oldest first
             jobs = sorted(jobs, key=lambda x: x.start_time)
-            logger.debug("Checking {!r}: {!r}".format(name, jobs))
+            self._logger.debug("Checking {!r}: {!r}".format(name, jobs))
 
             jobs_ok = []
             jobs_warning = []
@@ -593,9 +605,9 @@ class CheckStatus(object):
                 else:
                     jobs_critical.append(job)
 
-            logger.debug("Raw status OK      : {!r}".format(jobs_ok))
-            logger.debug("Raw status WARN    : {!r}".format(jobs_warning))
-            logger.debug("Raw status CRITICAL: {!r}".format(jobs_critical))
+            self._logger.debug("Raw status OK      : {!r}".format(jobs_ok))
+            self._logger.debug("Raw status WARN    : {!r}".format(jobs_warning))
+            self._logger.debug("Raw status CRITICAL: {!r}".format(jobs_critical))
 
             # add most recent job status to the totals
             if jobs_ok:
@@ -605,51 +617,91 @@ class CheckStatus(object):
             else:
                 self.checks_critical.append(jobs_critical[-1])
 
-    def _check_not_running(self, args, logger):
+    def _check_not_running(self):
         """
-        Look for job execution entrys (parsed into Job() instances), group them
-        per check name and determine the status. For each group, append status
-        to one of the three aggregate status lists of this object (checks_ok,
-        checks_warning or checks_critical).
+        Look for jobs that have not executed at all.
 
-        @param args: Parsed command line arguments
-        @param logger: logging logger
+        To figure out which jobs _should_ be executed, we make an inventory of all the check files in
+        args.checkdir. For some jobs, not_running is an OK/WARNING status, so call the check.not_running()
+        to figure that out.
         """
-        files = [f for f in os.listdir(args.checkdir) if os.path.isfile(os.path.join(args.checkdir, f))]
+        files = [f for f in os.listdir(self._args.checkdir) if os.path.isfile(os.path.join(self._args.checkdir, f))]
         for this in files:
             if not this.endswith('.ini'):
                 continue
-            filename = os.path.join(args.checkdir, this)
-            logger.debug("Loading check definition from {!r}".format(filename))
-            try:
-                # validate check loads
-                check = Check(filename, logger)
-            except ValueError as exc:
-                logger.warning("Failed loading check: {!r}".format(exc), exc_info=True)
-                raise CheckLoadError(filename = filename)
             name = this[:-4]  # remove the '.ini' suffix
+            check = self._get_check(name)
             if name not in self._jobs_by_name:
-                logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
+                filename = os.path.join(self._args.checkdir, this)
+                self._logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
                 job = Job(name=name)
                 action = check.not_running(job)
-                logger.debug('Not running job \'{}\' action: {}'.format(name, action))
+                self._logger.debug('Not running job {!r} action: {}'.format(name, action))
                 if action == 'OK':
                     self.checks_ok.append(job)
                 elif action == 'WARNING':
                     self.checks_warning.append(job)
                 else:
                     self.checks_critical.append(job)
-                    self._job_count += 1
             else:
-                logger.debug('Check {!r} has {!r} logged results'.format(name, len(self._jobs_by_name[name])))
+                self._logger.debug('Check {!r} has {!r} logged results'.format(name, len(self._jobs_by_name[name])))
 
+    def _get_check(self, name):
+        """
+        Load and cache the evaluation criterias for this job.
+
+        :param name: Name of job
+        :return: The check
+        :rtype: Check
+        """
+        if name not in self._checks:
+            check_filename = os.path.join(self._args.checkdir, name + '.ini')
+            self._logger.debug('Loading check definition from {!r}'.format(check_filename))
+            try:
+                self._checks[name] = Check(check_filename, self._logger)
+            except ScriptHerderError as exc:
+                raise CheckLoadError('Failed loading check', filename = check_filename)
+
+        return self._checks[name]
+
+    @property
     def num_jobs(self):
         """
         Return number of jobs processed. This is number of different jobs running + not running.
 
         @rtype: int
         """
-        return self._job_count
+        return len(self._jobs_by_name)
+
+    def aggregate_status(self):
+        """
+        Return the aggregate status of all jobs checked.
+
+        The level returned is 'OK', 'WARNING', 'CRITICAL' or 'UNKNOWN'.
+
+        :return: Level and message
+        :rtype: string_types, string_types
+        """
+        if self.num_jobs == 1:
+            # Single job check requested, output detailed information
+            if self.checks_ok:
+                return 'OK', self.checks_ok[-1]
+            if self.checks_warning:
+                return 'WARNING', self.checks_warning[-1]
+            if self.checks_critical:
+                return 'CRITICAL', self.checks_critical[-1]
+            return 'UNKNOWN', 'No jobs found for {!r}?'.format(self._args.cmd)
+
+        # When looking at multiple jobs at once, logic gets a bit reversed - if ANY
+        # job invocation is CRITICAL/WARNING, the aggregate message given to
+        # Nagios will have to be a failure.
+        if self.checks_critical:
+            return 'CRITICAL', _status_summary(self.num_jobs, self.checks_critical)
+        if self.checks_warning:
+            return 'WARNING', _status_summary(self.num_jobs, self.checks_warning)
+        if self.checks_ok:
+            return 'OK', _status_summary(self.num_jobs, self.checks_ok)
+        return 'UNKNOWN', 'No jobs found?'
 
 
 def parse_args(defaults):
@@ -747,12 +799,19 @@ def mode_ls(args, logger):
             # Show just the job named in cmd
             jobs = [x for x in _jobs if x.name in args.cmd]
 
+    checkstatus = CheckStatus(args, logger, jobs=[])
+    now = int(time.time())
+
     for this in jobs:
+        checkstatus.check_jobs([this], not_running=False)
+        level, msg, = checkstatus.aggregate_status()
+        age = _time_to_str(now - this.end_time)
+        status = '{:<8s} exit={}, age={:<5s}'.format(level, this.exit_status, age)
         start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
-        print('{start}  {duration:>6}  exit={exit}  name={name:<25}   {filename}'.format(
+        print('{start}  {duration:>6}  {status:<20s}  name={name:<25}  {filename}'.format(
             start = start,
             duration = this.duration_str,
-            exit = this.exit_status,
+            status = status,
             name = this.name,
             filename = this.filename,
         ))
@@ -776,37 +835,9 @@ def mode_check(args, logger):
         print("UNKNOWN: Failed loading check from file '{!s}' ({!s})".format(exc.filename, exc.reason))
         return exit_status['UNKNOWN']
 
-    if args.cmd:
-        # Single job check requested, output detailed information
-        if status.checks_ok:
-            print('OK: {!s}'.format(status.checks_ok[-1]))
-            return exit_status['OK']
-        if status.checks_warning:
-            print('WARNING: {!s}'.format(status.checks_warning[-1]))
-            return exit_status['WARNING']
-        if status.checks_critical:
-            print('CRITICAL: {!s}'.format(status.checks_critical[-1]))
-            return exit_status['CRITICAL']
-        print "UNKNOWN - no jobs found for {!r}?".format(args.cmd)
-        return exit_status['UNKNOWN']
-
-    # When looking at multiple jobs at once, logic gets a bit reversed - if ANY
-    # job invocation is CRITICAL/WARNING, the aggregate message given to
-    # Nagios will have to be a failure.
-    if status.checks_critical:
-        print('CRITICAL: {!s}'.format(
-            _status_summary(status.num_jobs(), status.checks_critical)))
-        return exit_status['CRITICAL']
-    if status.checks_warning:
-        print('WARNING: {!s}'.format(
-            _status_summary(status.num_jobs(), status.checks_warning)))
-        return exit_status['WARNING']
-    if status.checks_ok:
-        print('OK: {!s}'.format(
-            _status_summary(status.num_jobs(), status.checks_ok)))
-        return exit_status['OK']
-    print "UNKNOWN - no jobs found?"
-    return exit_status['UNKNOWN']
+    level, msg = status.aggregate_status()
+    print('{!s}: {!s}'.format(level, msg))
+    return exit_status[level]
 
 
 def mode_lastlog(args, logger, fail_status=False):
@@ -960,11 +991,6 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
         logger = logging.getLogger(myname)
     if args.debug:
         logger.setLevel(logging.DEBUG)
-        # log to stderr when debugging
-        formatter = logging.Formatter('%(asctime)s %(name)s %(threadName)s: %(levelname)s %(message)s')
-        stream_h = logging.StreamHandler(sys.stderr)
-        stream_h.setFormatter(formatter)
-        logger.addHandler(stream_h)
     if args.syslog:
         syslog_h = logging.handlers.SysLogHandler()
         formatter = logging.Formatter('%(name)s: %(levelname)s %(message)s')
