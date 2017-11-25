@@ -732,10 +732,24 @@ def mode_ls(args, logger):
     @param args: Parsed command line arguments
     @param logger: logging logger
     """
-    jobs = _get_job_results(args, logger)
-    for this in sorted(jobs, key=lambda x: x.start_time):
+    _jobs = sorted(_get_job_results(args, logger), key=lambda x: x.start_time)
+    if not args.cmd:
+        # Short-mode, just show the last execution for all jobs
+        print('\n=== Showing the last execution of each job, use \'--mode ls ALL\' to see all executions\n')
+        _uniq = {}
+        for this in _jobs:
+            _uniq[this.name] = this
+        jobs = sorted(_uniq.values(), key=lambda x: x.start_time)
+    else:
+        if args.cmd == ['ALL']:
+            jobs = _jobs
+        else:
+            # Show just the job named in cmd
+            jobs = [x for x in _jobs if x.name in args.cmd]
+
+    for this in jobs:
         start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
-        print('{start}  {duration:>6}  exit={exit}  name={name}   {filename}'.format(
+        print('{start}  {duration:>6}  exit={exit}  name={name:<25}   {filename}'.format(
             start = start,
             duration = this.duration_str,
             exit = this.exit_status,
@@ -867,9 +881,9 @@ def _get_job_results(args, logger):
             job = Job.from_file(filename)
         except JobLoadError as exc:
             logger.warning("Failed loading job file '{!s}' ({!s})".format(exc.filename, exc.reason))
-        if args.cmd:
-            if args.cmd[0] != job.name:
-                logger.debug("Skipping '{!s}' not matching '{!s}' (file {!s})".format(job.name, args.cmd[0], filename))
+        if args.cmd and args.cmd != ['ALL']:
+            if job.name not in args.cmd:
+                logger.debug('Skipping {!r} not matching {!r} (file {!s})'.format(job.name, args.cmd, filename))
                 continue
         jobs.append(job)
     return jobs
