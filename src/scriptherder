@@ -122,22 +122,30 @@ class Job(object):
     Representation of an execution of a job.
     """
 
-    def __init__(self, name, cmd=None):
+    def __init__(self, name, cmd=None, data=None):
         if cmd is None:
             cmd = []
         for x in cmd:
             assert(isinstance(x, basestring))
-        self._name = name
-        self._cmd = cmd
-        self._start_time = None
-        self._end_time = None
-        self._exit_status = None
-        self._pid = None
-        self._output = None
-        self._filename = None
-        self._output_filename = None
-        if self._name is None:
-            self._name = os.path.basename(self.cmd)
+        if data is None:
+            data = {'version': 2,
+                    'name': name,
+                    'cmd': cmd,
+                    }
+        if data.get('name') is None:
+            data['name'] = os.path.basename(cmd)
+
+        if data.get('version') == 1:
+            self._output = data['output']
+            self._output_filename = None
+
+        elif data.get('version') == 2:
+            self._output_filename = data.get('output_filename')
+            #self._output_size = data.get('output_size')  # currently not used in scriptherder
+        else:
+            raise JobLoadError('Unknown version: {!r}'.format(data.get('version')), filename=filename)
+
+        self._data = data
 
     def __repr__(self):
         start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
@@ -164,12 +172,12 @@ class Job(object):
 
         E.g. 'name[exit=0,age=19h]'
         """
-        if self._end_time is None or self._start_time is None:
+        if self.end_time is None or self.start_time is None:
             return '{name}[not_running]'.format(name = self.name)
-        age = _time_to_str(time.time() - self._start_time)
+        age = _time_to_str(time.time() - self.start_time)
         return '{name}[exit={exit_status},age={age}]'.format(
             name = self.name,
-            exit_status = self._exit_status,
+            exit_status = self.exit_status,
             age = age,
             )
 
@@ -180,9 +188,9 @@ class Job(object):
 
         @rtype: string
         """
-        if self._name is None:
+        if self._data.get('name') is None:
             return self.cmd
-        return self._name
+        return self._data['name']
 
     @property
     def cmd(self):
@@ -191,7 +199,7 @@ class Job(object):
 
         @rtype: string
         """
-        return self._cmd[0]
+        return self._data['cmd'][0]
 
     @property
     def args(self):
@@ -200,7 +208,7 @@ class Job(object):
 
         @rtype: [string]
         """
-        return self._cmd[1:]
+        return self._data['cmd'][1:]
 
     @property
     def start_time(self):
@@ -209,9 +217,9 @@ class Job(object):
 
         @rtype: int() or None
         """
-        if self._start_time is None:
+        if 'start_time' not in self._data:
             return None
-        return int(self._start_time)
+        return int(self._data['start_time'])
 
     @property
     def end_time(self):
@@ -220,9 +228,9 @@ class Job(object):
 
         @rtype: int() or None
         """
-        if self._end_time is None:
+        if 'end_time' not in self._data:
             return None
-        return int(self._end_time)
+        return int(self._data['end_time'])
 
     @property
     def duration_str(self):
@@ -231,9 +239,9 @@ class Job(object):
 
         @rtype: string
         """
-        if self._end_time is None or self._start_time is None:
+        if self.end_time is None or self.start_time is None:
             return 'NaN'
-        duration = self._end_time - self._start_time
+        duration = self.end_time - self.start_time
         return _time_to_str(duration)
 
     @property
@@ -243,7 +251,7 @@ class Job(object):
 
         @rtype: int() or None
         """
-        return self._exit_status
+        return self._data['exit_status']
 
     @property
     def pid(self):
@@ -252,7 +260,7 @@ class Job(object):
 
         @rtype: int() or None
         """
-        return self._pid
+        return self._data['pid']
 
     @property
     def filename(self):
@@ -261,7 +269,7 @@ class Job(object):
 
         @rtype: string or None
         """
-        return self._filename
+        return self._data.get('filename')
 
     @property
     def output(self):
@@ -270,20 +278,20 @@ class Job(object):
 
         @rtype: [string]
         """
-        if not self._output and self.output_filename:
+        if not self._data.get('output') and self.output_filename:
             f = open(self.output_filename, 'r')
-            self._output = f.read()
+            self._data['output'] = f.read()
             f.close()
-        return self._output
+        return self._data.get('output')
 
     @property
     def output_filename(self):
         """
         The name of the file holding the output (STDOUT and STDERR) of the script invocation.
 
-        @rtype: [string]
+        @rtype: string | None
         """
-        return self._output_filename
+        return self._data.get('output_filename')
 
     def run(self):
         """
@@ -351,7 +359,8 @@ class Job(object):
             os.rename(output_fn + '.tmp', output_fn + '.data')
             self._output_filename = output_fn
 
-    def from_file(self, filename):
+    @classmethod
+    def from_file(cls, filename):
         """
         Initialize this Job instance with data loaded from a file (previously created with
         `save_to_file()'.
@@ -367,33 +376,8 @@ class Job(object):
         except ValueError:
             raise JobLoadError('JSON parsing failed', filename=filename)
         f.close()
-        if data.get('version') == 1:
-            self._name = data.get('name')
-            for x in data['cmd']:
-                assert(isinstance(x, basestring))
-            self._cmd = data['cmd']
-            self._start_time = data['start_time']
-            self._end_time = data['end_time']
-            self._pid = data['pid']
-            self._exit_status = data['exit_status']
-            self._output = data['output']
-            self._output_filename = None
-            self._filename = filename
-        elif data.get('version') == 2:
-            self._name = data.get('name')
-            for x in data['cmd']:
-                assert(isinstance(x, basestring))
-            self._cmd = data['cmd']
-            self._start_time = data['start_time']
-            self._end_time = data['end_time']
-            self._pid = data['pid']
-            self._exit_status = data['exit_status']
-            self._output_filename = data.get('output_filename')
-            #self._output_size = data.get('output_size')  # currently not used in scriptherder
-            self._filename = filename
-        else:
-            raise JobLoadError('Unknown version: {!r}'.format(data.get('version')), filename=filename)
-        return self
+        data['filename'] = filename
+        return cls('', data=data)
 
 
 class Check(object):
@@ -668,19 +652,6 @@ class CheckStatus(object):
         return self._job_count
 
 
-def job_from_file(filename):
-    """
-    Recreate Job() instance from saved file.
-
-    @param filename: Filename to load script invocation details from
-
-    @type filename: string
-    @rtype: Job
-    """
-    job = Job('')
-    return job.from_file(filename)
-
-
 def parse_args(defaults):
     """
     Parse the command line arguments
@@ -893,7 +864,7 @@ def _get_job_results(args, logger):
             continue
         filename = os.path.join(args.datadir, this)
         try:
-            job = job_from_file(filename)
+            job = Job.from_file(filename)
         except JobLoadError as exc:
             logger.warning("Failed loading job file '{!s}' ({!s})".format(exc.filename, exc.reason))
         if args.cmd:
