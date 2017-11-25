@@ -416,11 +416,35 @@ class Check(object):
         """
         self.logger = logger
         self.config = ConfigParser.ConfigParser(_check_defaults)
+        self.filename = filename
         if not self.config.read([filename]):
-            raise ScriptHerderError('Failed loading config file', filename)
+            raise CheckLoadError('Failed reading file', filename)
         _section = 'check'
-        self._ok_criteria = [x.strip() for x in self.config.get(_section, 'ok').split(',')]
-        self._warning_criteria = [x.strip() for x in self.config.get(_section, 'warning').split(',')]
+        try:
+            self._ok_criteria = self._parse_criterias(self.config.get(_section, 'ok'))
+            self._warning_criteria = self._parse_criterias(self.config.get(_section, 'warning'))
+        except CheckLoadError as exc:
+            raise
+        except Exception as exc:
+            logger.exception(exc)
+            raise CheckLoadError('Failed loading file', filename)
+
+    def _parse_criterias(self, data_str):
+        res = []
+        for this in data_str.split(','):
+            this = this.strip()
+            if '=' not in this:
+                # check for allowed single-value criteria
+                if this not in ['not_running']:
+                    raise CheckLoadError('Bad criteria: {!r}'.format(this), self.filename)
+                res += [(this, None)]
+                continue
+            # parse regular what=value criteria
+            (what, value) = this.split('=')
+            what = what.strip()
+            value = value.strip()
+            res += [(what, value)]
+        return res
 
     def job_is_ok(self, job):
         """
@@ -432,7 +456,7 @@ class Check(object):
         """
         res = True
         for this in self._ok_criteria:
-            if this == 'not_running':
+            if this == ('not_running', None):
                 # special case criteria handled in function not_running()
                 continue
             if not self._evaluate(this, job):
@@ -451,7 +475,7 @@ class Check(object):
         """
         res = True
         for this in self._warning_criteria:
-            if this == 'not_running':
+            if this == ('not_running', None):
                 # special case criteria handled in function not_running()
                 continue
             if not self._evaluate(this, job):
@@ -467,12 +491,11 @@ class Check(object):
         @param criteria: The criteria to test ('max_age=8h' for example)
         @param job: The job
 
-        @type criteria: string
+        @type criteria: (string, string | None)
         @type job: Job
         """
-        (what, value) = criteria.split('=')
-        what.strip()
-        value.strip()
+        self.logger.debug('Evaluating {!r}'.format(criteria))
+        what, value, = criteria
         if what == 'exit_status':
             value = int(value)
             res = (job.exit_status == value)
@@ -508,9 +531,9 @@ class Check(object):
         @return: 'OK', 'WARNING' or 'CRITICAL'
         @rtype: str | unicode
         """
-        if 'not_running' in self._ok_criteria:
+        if ('not_running', None) in self._ok_criteria:
             return 'OK'
-        if 'not_running' in self._warning_criteria:
+        if ('not_running', None) in self._warning_criteria:
             return 'WARNING'
         return 'CRITICAL'
 
@@ -569,7 +592,6 @@ class CheckStatus(object):
             try:
                 check = Check(check_filename, logger)
             except ScriptHerderError as exc:
-                logger.warning("Failed loading check: {!r}".format(exc), exc_info=True)
                 raise CheckLoadError('Failed loading check', filename = check_filename)
 
             # Sort jobs, oldest first
