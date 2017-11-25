@@ -806,7 +806,23 @@ def mode_ls(args, logger):
         checkstatus.check_jobs([this], not_running=False)
         level, msg, = checkstatus.aggregate_status()
         age = _time_to_str(now - this.end_time)
-        status = '{:<8s} exit={}, age={:<5s}'.format(level, this.exit_status, age)
+        color1 = ''
+        color2 = ''
+        reset = ''
+        if level != 'OK' and sys.stdout.isatty():
+            color1 = "\033[;1m"  # bold
+            color2 = "\033[;1m"  # bold
+            reset = "\033[0;0m"
+            if level=='CRITICAL':
+                color1 = "\033[1;31m"  # red
+        status = '{color1}{level:<8s} {color2}exit={exit}, age={age:<5s}{reset}'.format(
+            color1 = color1,
+            color2 = color2,
+            reset = reset,
+            level = level,
+            exit = this.exit_status,
+            age = age,
+        )
         start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
         print('{start}  {duration:>6}  {status:<20s}  name={name:<25}  {filename}'.format(
             start = start,
