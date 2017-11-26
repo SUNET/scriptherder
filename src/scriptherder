@@ -135,45 +135,47 @@ class Job(object):
         if data.get('name') is None:
             data['name'] = os.path.basename(cmd)
 
-        if data.get('version') == 1:
-            self._output = data['output']
-            self._output_filename = None
-
-        elif data.get('version') == 2:
-            self._output_filename = data.get('output_filename')
-            #self._output_size = data.get('output_size')  # currently not used in scriptherder
-        else:
+        if data.get('version') not in [1, 2]:
             raise JobLoadError('Unknown version: {!r}'.format(data.get('version')), filename=filename)
+
+        # Output of command is saved outside self._data between execution and save
+        self._output = None
+
+        # The check verdict for this job
+        self.check_status = None
+        self.check_reason = None
 
         self._data = data
 
     def __repr__(self):
-        if self.end_time is None or self.start_time is None:
-            status = 'not_running'
-        else:
-            start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
-            status = 'start={start}, exit={exit}'.format(start = start,
-                                                         exit = self.exit_status,
-                                                         )
-        return '<{} instance at {:#x}: \'{name}\' {status}'.format(
+        return '<{} instance at {:#x}: {}>'.format(
             self.__class__.__name__,
             id(self),
-            name=self.name,
-            status=status,
+            str(self),
         )
 
     def __str__(self):
         if self.end_time is None or self.start_time is None:
             return '{!r} not_running'.format(self.name)
         start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
-        age = _time_to_str(time.time() - self.start_time)
-        return '\'{name}\' start={start} ({age}), duration={duration}, exit={exit}'.format(
+        status = ''
+        if self.check_status:
+            status = ', status={}'.format(self.check_status)
+        return '{name} start={start} ({age} ago), duration={duration}, exit={exit}{status}'.format(
             name = self.name,
             start = start,
-            age = age,
+            age = self.age,
             duration = self.duration_str,
             exit = self.exit_status,
+            status = status,
         )
+
+    @property
+    def age(self):
+        """ Return how long ago this job executed. """
+        if self.start_time is None:
+            return 'N/A'
+        return _time_to_str(time.time() - self.start_time)
 
     def status_summary(self):
         """
@@ -287,6 +289,8 @@ class Job(object):
 
         @rtype: [string]
         """
+        if self._output is not None:
+            return self._output
         if not self._data.get('output') and self.output_filename:
             f = open(self.output_filename, 'r')
             self._data['output'] = f.read()
@@ -306,7 +310,7 @@ class Job(object):
         """
         Run script, storing various aspects of the results.
         """
-        self._start_time = time.time()
+        self._data['start_time'] = time.time()
         proc = subprocess.Popen(self._data['cmd'],
                                 cwd='/',
                                 stdout=subprocess.PIPE,
@@ -314,10 +318,10 @@ class Job(object):
                                 close_fds=True,
                                 )
         (stdout, _stderr) = proc.communicate()
-        self._end_time = time.time()
+        self._data['end_time'] = time.time()
         self._output = stdout
-        self._exit_status = proc.returncode
-        self._pid = proc.pid
+        self._data['exit_status'] = proc.returncode
+        self._data['pid'] = proc.pid
 
     def save_to_file(self, datadir, logger, filename=None):
         """
@@ -343,30 +347,49 @@ class Job(object):
         logger.debug("Saving job metadata to file {!r}.tmp".format(fn))
         output_fn = fn + '_output'
         f = open(fn + '.tmp', 'w')
-        data = {'name': self.name,
-                'cmd': self._cmd,
-                'start_time': self._start_time,
-                'end_time': self._end_time,
-                'pid': self.pid,
-                'exit_status': self.exit_status,
-                'version': 2,
-                }
-        if self._output:
-            data['output_filename'] = output_fn + '.data'
-            data['output_size'] = len(self._output)
-        f.write(json.dumps(data, indent = 4, sort_keys = True))
+        if self._output is not None:
+            self._data['output_filename'] = output_fn + '.data'
+            self._data['output_size'] = len(self._output)
+        f.write(json.dumps(self._data, indent = 4, sort_keys = True))
         f.write('\n')
         f.close()
         os.rename(fn + '.tmp', fn + '.json')
-        self._filename = fn
+        self._data['filename'] = fn
 
-        if self._output:
+        if self._output is not None:
+            output_fn = self.output_filename
             logger.debug("Saving job output to file {!r}".format(output_fn))
-            f = open(output_fn + '.tmp', 'w')
-            f.write(self._output)
-            f.close()
-            os.rename(output_fn + '.tmp', output_fn + '.data')
-            self._output_filename = output_fn
+            with open(output_fn + '.tmp', 'w') as fd:
+                fd.write(self._output)
+            os.rename(output_fn + '.tmp', output_fn)
+            self._output = None
+
+    def check(self, check):
+        """
+
+        :param check: The check to evaluate this job against.
+
+        :type check: Check
+        :return:
+        """
+        status, msg = check.job_is_ok(self)
+        if status is True:
+            self.check_status = 'OK'
+            self.check_reason = ', '.join(msg)
+        else:
+            status, msg = check.job_is_warning(self)
+            if status is True:
+                self.check_status = 'WARNING'
+                self.check_reason = ', '.join(msg)
+            else:
+                self.check_status = 'CRITICAL'
+                self.check_reason = ', '.join(msg)
+
+    def is_ok(self):
+        return (self.check_status == 'OK')
+
+    def is_warning(self):
+        return (self.check_status == 'WARNING')
 
     @classmethod
     def from_file(cls, filename):
@@ -387,6 +410,66 @@ class Job(object):
         f.close()
         data['filename'] = filename
         return cls('', data=data)
+
+
+class JobsList(object):
+    """
+    Load all jobs matching any specified name on the command line.
+
+    @param args: Parsed command line arguments
+    @param logger: logging logger
+    """
+    def __init__(self, args, logger, jobs=None):
+        self.jobs = []
+        self._by_name = None
+        self._last_of_each = None
+
+        if jobs is None:
+            jobs = []
+            files = [f for f in os.listdir(args.datadir) if os.path.isfile(os.path.join(args.datadir, f))]
+            for this in files:
+                if not this.endswith('.json'):
+                    continue
+                filename = os.path.join(args.datadir, this)
+                try:
+                    job = Job.from_file(filename)
+                except JobLoadError as exc:
+                    logger.warning('Failed loading job file {!r} ({!s})'.format(exc.filename, exc.reason))
+                if args.cmd and args.cmd != ['ALL']:
+                    if job.name not in args.cmd:
+                        logger.debug('Skipping {!r} not matching {!r} (file {!s})'.format(job.name, args.cmd, filename))
+                        continue
+                jobs.append(job)
+        # Sort jobs, oldest first
+        self.jobs = sorted(jobs, key = lambda x: x.start_time)
+
+    @property
+    def by_name(self):
+        """
+        Group jobs by name into a dict - in chronological order.
+        :return:
+        """
+        if self._by_name is None:
+            jobs_by_name = {}
+            for job in self.jobs:
+                if job.name not in jobs_by_name:
+                    jobs_by_name[job.name] = []
+                jobs_by_name[job.name].append(job)
+            self._by_name = jobs_by_name
+        return self._by_name
+
+    @property
+    def last_of_each(self):
+        """
+        Get a list of just the last job of each
+        :rtype: [Job]
+        """
+        if self._last_of_each is None:
+            _uniq = {}
+            for this in self.jobs:
+                _uniq[this.name] = this
+            self._last_of_each = sorted(_uniq.values(), key=lambda x: x.start_time)
+        return self._last_of_each
 
 
 class Check(object):
@@ -445,18 +528,9 @@ class Check(object):
 
         @type job: Job
 
-        @rtype: bool
+        @rtype: bool, list
         """
-        res = True
-        for this in self._ok_criteria:
-            if this == ('not_running', None):
-                # special case criteria handled in function not_running()
-                continue
-            if not self._evaluate(this, job):
-                self.logger.debug("Job {!r} failed OK criteria {!r}".format(job, this))
-                res = False
-        self.logger.debug("{!r} is OK result: {!r}".format(job, res))
-        return res
+        return self._evaluate(self._ok_criteria, job)
 
     def job_is_warning(self, job):
         """
@@ -464,54 +538,93 @@ class Check(object):
 
         @type job: Job
 
-        @rtype: bool
+        @rtype: bool, list
         """
-        res = True
-        for this in self._warning_criteria:
-            if this == ('not_running', None):
-                # special case criteria handled in function not_running()
-                continue
-            if not self._evaluate(this, job):
-                self.logger.debug("Job {!r} failed WARNING criteria {!r}".format(job, this))
-                res = False
-        self.logger.debug("{!r} is WARNING result: {!r}".format(job, res))
-        return res
+        return self._evaluate(self._warning_criteria, job)
 
-    def _evaluate(self, criteria, job):
+    def _evaluate(self, criterias, job):
         """
         The actual evaluation engine.
 
-        @param criteria: The criteria to test ('max_age=8h' for example)
+        For each criteria `foo', look for a corresponding check_foo function and call it.
+
+        @param criterias: List of criterias to test ([('max_age', '8h')] for example)
         @param job: The job
 
-        @type criteria: (string, string | None)
+        @type criterias: [(string, string | None)]
         @type job: Job
+
+        @returns: True or False, and a list of strings describing success/failure
+        @rtype: True | string_types
         """
-        self.logger.debug('Evaluating {!r}'.format(criteria))
-        what, value, = criteria
-        if what == 'exit_status':
-            value = int(value)
-            res = (job.exit_status == value)
-            self.logger.debug("Evaluate criteria {!r}: ({!r} == {!r}) {!r}".format(
-                criteria, job.exit_status, value, res))
-            return res
-        elif what == 'max_age':
-            value = _parse_time_value(value)
-            now = int(time.time())
-            res = (job.end_time > (now - value))
-            self.logger.debug("Evaluate criteria {!r}: ({!r} > ({!r} - {!r}) {!r}".format(
-                criteria, job.end_time, now, value, res))
-            return res
-        elif what == 'output_contains' or what == 'output_not_contains':
-            value = value.strip()
-            res = re.match(value, job.output) is not None
+        res = True
+        ok_msgs = []
+        fail_msgs = []
+        for this in criterias:
+            self.logger.debug('Evaluating {!r}'.format(this))
+            what, value, = this
+            name = what
+            negate = False
             if what == 'output_not_contains':
-                res = not res  # invert result
-            self.logger.debug("Evaluate criteria {!r}: {!r} matching in {!s} bytes output: {!r}".format(
-                criteria, value, len(job.output), res))
-            return res
-        self.logger.debug("Evaluation of unknown criteria {!r}, defaulting to False".format(criteria))
-        return False
+                # backwards compat
+                what = '!output_contains'
+            if what.startswith('!'):
+                negate = True
+                name = name[1:]
+            func = getattr(self, 'check_' + name)
+            if not func:
+                return 'unknown_criteria'
+            status, msg = func(job, value, negate)
+            self.logger.debug('Function {}({}) (negate: {}) returned: {}'.format('check_' + what, value, negate, res))
+            if msg == '':
+                # default message is the criteria as a string
+                msg = '{}={}'.format(what, value)
+
+            if not status:
+                self.logger.debug("Job {!r} failed criteria {!r} with status {!r}".format(job, this, status))
+                res = False
+                fail_msgs += [msg]
+            else:
+                ok_msgs += [msg]
+
+        if res:
+            return True, ok_msgs
+        return False, fail_msgs
+
+    # Functions named check_ are the actual criterias that can be entered in the INI files.
+    # These functions should return True, False and a string describing why they succeeded or failed.
+
+    def check_exit_status(self, job, value, negate):
+        """ Check if job exit status matches 'value' """
+        value = int(value)
+        res = (job.exit_status == value)
+        if negate:
+            res = not res
+        reason = 'exit={}'.format(value)
+        if not res:
+            reason = 'exit={}!={}'.format(job.exit_status, value)
+            if negate:
+                reason = 'exit={}=={}'.format(job.exit_status, value)
+        return res, reason
+
+    def check_max_age(self, job, value, negate):
+        value = _parse_time_value(value)
+        now = int(time.time())
+        res = (job.end_time > (now - value))
+        if negate:
+            res = not res
+        reason = 'age={}'.format(job.age)
+        if not res:
+            reason = 'age={}>{}'.format(job.age, _time_to_str(value))
+            if negate:
+                reason = 'age={}<={}'.format(job.age, _time_to_str(value))
+        return res, reason
+
+    def check_output_contains(self, job, value, negate):
+        res = re.match(value, job.output) is not None
+        if negate:
+            res = not res  # invert result
+        return res, ''
 
     def not_running(self, job):
         """
@@ -546,6 +659,7 @@ class CheckStatus(object):
         """
         @param args: Parsed command line arguments
         @param logger: logging logger
+        :type jobs: JobsList or None
         """
 
         self.checks_ok = []
@@ -555,31 +669,29 @@ class CheckStatus(object):
         self._checks = {}
         self._args = args
         self._logger = logger
+        self._last_num_checked = None
 
-        self._jobs_by_name = None
-
-        if jobs is None:
-            jobs = _get_job_results(args, logger)
-        self.check_jobs(jobs)
+        if jobs is not None:
+            self.check_jobs(jobs)
 
     def check_jobs(self, jobs, not_running=True):
-        # group the jobs by their name
-        _by_name = {}
-        for this in jobs:
-            if this.name not in _by_name:
-                _by_name[this.name] = []
-            _by_name[this.name].append(this)
-        self._jobs_by_name = _by_name
+        """
+        Run checks on a number of jobs.
+        :param not_running: Include check of not running jobs.
 
+        :type jobs: JobsList
+        :return:
+        """
         self.checks_ok = []
         self.checks_warning = []
         self.checks_critical = []
 
-        self._check_running_jobs()
+        self._check_running_jobs(jobs)
         if not_running and not self._args.cmd:
-            self._check_not_running()
+            self._check_not_running(jobs)
+        self._last_num_checked = len(jobs.by_name)
 
-    def _check_running_jobs(self):
+    def _check_running_jobs(self, jobs):
         """
         Look for job execution entrys (parsed into Job() instances), group them
         per check name and determine the status. For each group, append status
@@ -587,20 +699,19 @@ class CheckStatus(object):
         checks_warning or checks_critical).
         """
         # determine total check status based on all logged invocations of this job
-        for (name, jobs) in self._jobs_by_name.items():
+        for (name, jobs) in jobs.by_name.items():
             check = self._get_check(name)
 
-            # Sort jobs, oldest first
-            jobs = sorted(jobs, key=lambda x: x.start_time)
             self._logger.debug("Checking {!r}: {!r}".format(name, jobs))
 
             jobs_ok = []
             jobs_warning = []
             jobs_critical = []
             for job in jobs:
-                if check.job_is_ok(job):
+                job.check(check)
+                if job.is_ok():
                     jobs_ok.append(job)
-                elif check.job_is_warning(job):
+                elif job.is_warning():
                     jobs_warning.append(job)
                 else:
                     jobs_critical.append(job)
@@ -617,7 +728,7 @@ class CheckStatus(object):
             else:
                 self.checks_critical.append(jobs_critical[-1])
 
-    def _check_not_running(self):
+    def _check_not_running(self, jobs):
         """
         Look for jobs that have not executed at all.
 
@@ -631,7 +742,7 @@ class CheckStatus(object):
                 continue
             name = this[:-4]  # remove the '.ini' suffix
             check = self._get_check(name)
-            if name not in self._jobs_by_name:
+            if name not in jobs.by_name:
                 filename = os.path.join(self._args.checkdir, this)
                 self._logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
                 job = Job(name=name)
@@ -671,7 +782,7 @@ class CheckStatus(object):
 
         @rtype: int
         """
-        return len(self._jobs_by_name)
+        return self._last_num_checked
 
     def aggregate_status(self):
         """
@@ -685,11 +796,11 @@ class CheckStatus(object):
         if self.num_jobs == 1:
             # Single job check requested, output detailed information
             if self.checks_ok:
-                return 'OK', self.checks_ok[-1]
+                return 'OK', self.checks_ok[-1].check_reason
             if self.checks_warning:
-                return 'WARNING', self.checks_warning[-1]
+                return 'WARNING', self.checks_warning[-1].check_reason
             if self.checks_critical:
-                return 'CRITICAL', self.checks_critical[-1]
+                return 'CRITICAL', self.checks_critical[-1].check_reason
             return 'UNKNOWN', 'No jobs found for {!r}?'.format(self._args.cmd)
 
         # When looking at multiple jobs at once, logic gets a bit reversed - if ANY
@@ -784,47 +895,46 @@ def mode_ls(args, logger):
     @param args: Parsed command line arguments
     @param logger: logging logger
     """
-    _jobs = sorted(_get_job_results(args, logger), key=lambda x: x.start_time)
+    jobs = JobsList(args, logger)
+    last_of_each = jobs.last_of_each
     if not args.cmd:
         # Short-mode, just show the last execution for all jobs
         print('\n=== Showing the last execution of each job, use \'--mode ls ALL\' to see all executions\n')
-        _uniq = {}
-        for this in _jobs:
-            _uniq[this.name] = this
-        jobs = sorted(_uniq.values(), key=lambda x: x.start_time)
+        chosen_jobs = last_of_each
     else:
-        if args.cmd == ['ALL']:
-            jobs = _jobs
-        else:
-            # Show just the job named in cmd
-            jobs = [x for x in _jobs if x.name in args.cmd]
+        chosen_jobs = jobs.jobs
 
-    checkstatus = CheckStatus(args, logger, jobs=[])
+    checkstatus = CheckStatus(args, logger)
     now = int(time.time())
 
-    for this in jobs:
-        checkstatus.check_jobs([this], not_running=False)
-        level, msg, = checkstatus.aggregate_status()
-        age = _time_to_str(now - this.end_time)
+    for this in chosen_jobs:
+        if this in last_of_each:
+            # For the last instance of each job, evaluate full check-mode status
+            checkstatus.check_jobs(JobsList(None, None, jobs=[this]), not_running=False)
+            level, msg, = checkstatus.aggregate_status()
+        else:
+            level = '-'
+            if this.exit_status != 0:
+                level = 'Non-zero'
+            msg = 'exit={}, age={}'.format(this.exit_status, this.age)
         color1 = ''
         color2 = ''
         reset = ''
-        if level != 'OK' and sys.stdout.isatty():
+        if level not in ['OK', '-'] and sys.stdout.isatty():
             color1 = "\033[;1m"  # bold
             color2 = "\033[;1m"  # bold
             reset = "\033[0;0m"
-            if level=='CRITICAL':
+            if level == 'CRITICAL':
                 color1 = "\033[1;31m"  # red
-        status = '{color1}{level:<8s} {color2}exit={exit}, age={age:<5s}{reset}'.format(
+        status = '{color1}{level:<8s} {color2}{msg:<20s}{reset}'.format(
             color1 = color1,
             color2 = color2,
             reset = reset,
             level = level,
-            exit = this.exit_status,
-            age = age,
+            msg = msg,
         )
         start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
-        print('{start}  {duration:>6}  {status:<20s}  name={name:<25}  {filename}'.format(
+        print('{start}  {duration:>6}  {status}  name={name:<25}  {filename}'.format(
             start = start,
             duration = this.duration_str,
             status = status,
@@ -864,16 +974,11 @@ def mode_lastlog(args, logger, fail_status=False):
     @param args: Parsed command line arguments
     @param logger: logging logger
     """
-    _jobs = sorted(_get_job_results(args, logger), key=lambda x: x.start_time)
-    jobs_by_name = {}
-    for job in _jobs:
-        if job.name not in jobs_by_name:
-            jobs_by_name[job.name] = []
-        jobs_by_name[job.name].append(job)
+    _jobs = JobsList(args, logger)
 
-    if len(jobs_by_name) > 0:
+    if len(_jobs.by_name) > 0:
         view_jobs = []
-        for (name, jobs) in jobs_by_name.items():
+        for (name, jobs) in _jobs.by_name.items():
             job = jobs[-1]  # last job (any status)
             if job.output_filename:
                 if fail_status and job.exit_status != 0:
@@ -889,7 +994,8 @@ def mode_lastlog(args, logger, fail_status=False):
                         shutil.copyfileobj(f, sys.stdout)
                         print '=== End of script output\n'
         else:
-            print('No script output found for {!s} with fail_status={!s}'.format(', '.join(jobs_by_name.keys()), fail_status))
+            print('No script output found for {!s} with fail_status={!s}'.format(
+                ', '.join(jobs.by_name.keys()), fail_status))
     else:
         print "No jobs found"
 
@@ -898,42 +1004,17 @@ def _status_summary(num_jobs, failed):
     """
     String format routine used in output of checks status.
     """
-    fmt = '{jobs} job in this state: {summary}'
-    if len(failed) == 1:
-        fmt = '{jobs}/{num_jobs} job in this state: {summary}'
+    plural = ''
+    if len(failed) != 1:
+        plural = 's'
 
     summary = ', '.join(sorted([str(x.status_summary()) for x in failed]))
-    return fmt.format(jobs = len(failed),
-                      num_jobs = num_jobs,
-                      summary = summary,
-                      )
-
-
-def _get_job_results(args, logger):
-    """
-    Load all jobs matching any specified name on the command line.
-
-    @param args: Parsed command line arguments
-    @param logger: logging logger
-
-    @rtype: [Job]
-    """
-    files = [f for f in os.listdir(args.datadir) if os.path.isfile(os.path.join(args.datadir, f))]
-    jobs = []
-    for this in files:
-        if not this.endswith('.json'):
-            continue
-        filename = os.path.join(args.datadir, this)
-        try:
-            job = Job.from_file(filename)
-        except JobLoadError as exc:
-            logger.warning("Failed loading job file '{!s}' ({!s})".format(exc.filename, exc.reason))
-        if args.cmd and args.cmd != ['ALL']:
-            if job.name not in args.cmd:
-                logger.debug('Skipping {!r} not matching {!r} (file {!s})'.format(job.name, args.cmd, filename))
-                continue
-        jobs.append(job)
-    return jobs
+    return '{jobs}/{num_jobs} job{plural} in this state: {summary}'.format(
+        jobs = len(failed),
+        num_jobs = num_jobs,
+        summary = summary,
+        plural = plural,
+    )
 
 
 def _parse_time_value(value):
@@ -969,7 +1050,7 @@ def _time_to_str(value):
     """
     if value < 1:
         # milliseconds
-        return '{:0.3f}ms'.format(value * 1000)
+        return '{:0.1f}ms'.format(value * 1000)
     if value < 60:
         return '{!s}s'.format(int(value))
     if value < 3600:
