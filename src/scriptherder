@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Copyright 2014 SUNET. All rights reserved.
+# Copyright 2014, 2015, 2017 SUNET. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without modification, are
 # permitted provided that the following conditions are met:
@@ -62,11 +62,14 @@ than eight hours ago, WARNING if less than 24 and after that CRITICAL:
     max_age=8h                   Must have executed less than 8h ago
     not_running                  Job is not running
     output_contains=OK           Output contains the text OK
-    output_not_contains=ERROR    Output does not contain the text ERROR
+    output_matches=.*OK.*        Output matches the regexp
+    OR_file_exists=FILE          Check if a file exists, such as a disable-file for a job
+    OR_running                   True if a job is running - useful for jobs that run @reboot etc.
 """
 
 import os
 import re
+import six
 import sys
 import shutil
 import time
@@ -75,7 +78,7 @@ import logging
 import logging.handlers
 import argparse
 import subprocess
-import ConfigParser
+from six.moves import configparser
 
 _defaults = {'debug': False,
              'syslog': False,
@@ -126,14 +129,14 @@ class Job(object):
         if cmd is None:
             cmd = []
         for x in cmd:
-            assert(isinstance(x, basestring))
+            assert(isinstance(x, six.string_types))
         if data is None:
             data = {'version': 2,
                     'name': name,
                     'cmd': cmd,
                     }
         if data.get('name') is None:
-            data['name'] = os.path.basename(cmd)
+            data['name'] = os.path.basename(cmd[0])
 
         if data.get('version') not in [1, 2]:
             raise JobLoadError('Unknown version: {!r}'.format(data.get('version')), filename=filename)
@@ -155,7 +158,7 @@ class Job(object):
         )
 
     def __str__(self):
-        if self.end_time is None or self.start_time is None:
+        if not self.is_running:
             return '{!r} not_running'.format(self.name)
         start = time.strftime('%Y-%m-%d %X', time.localtime(self.start_time))
         status = ''
@@ -183,7 +186,7 @@ class Job(object):
 
         E.g. 'name[exit=0,age=19h]'
         """
-        if self.end_time is None or self.start_time is None:
+        if not self.is_running:
             return '{name}[not_running]'.format(name = self.name)
         age = _time_to_str(time.time() - self.start_time)
         return '{name}[exit={exit_status},age={age}]'.format(
@@ -262,7 +265,7 @@ class Job(object):
 
         @rtype: int() or None
         """
-        return self._data['exit_status']
+        return self._data.get('exit_status')
 
     @property
     def pid(self):
@@ -319,9 +322,9 @@ class Job(object):
                                 )
         (stdout, _stderr) = proc.communicate()
         self._data['end_time'] = time.time()
-        self._output = stdout
         self._data['exit_status'] = proc.returncode
         self._data['pid'] = proc.pid
+        self._output = stdout
 
     def save_to_file(self, datadir, logger, filename=None):
         """
@@ -364,7 +367,7 @@ class Job(object):
             os.rename(output_fn + '.tmp', output_fn)
             self._output = None
 
-    def check(self, check):
+    def check(self, check, logger):
         """
 
         :param check: The check to evaluate this job against.
@@ -373,11 +376,14 @@ class Job(object):
         :return:
         """
         status, msg = check.job_is_ok(self)
+        logger.debug('OK check result: {} {}'.format(status, msg))
         if status is True:
             self.check_status = 'OK'
             self.check_reason = ', '.join(msg)
         else:
-            status, msg = check.job_is_warning(self)
+            status,warn_msg = check.job_is_warning(self)
+            logger.debug('Warning check result: {} {}'.format(status, warn_msg))
+            msg += warn_msg
             if status is True:
                 self.check_status = 'WARNING'
                 self.check_reason = ', '.join(msg)
@@ -390,6 +396,14 @@ class Job(object):
 
     def is_warning(self):
         return (self.check_status == 'WARNING')
+
+    @property
+    def is_running(self):
+        """
+        Check if job has executed or not.
+        :rtype: bool
+        """
+        return self.start_time is not None and self.end_time is not None
 
     @classmethod
     def from_file(cls, filename):
@@ -419,10 +433,12 @@ class JobsList(object):
     @param args: Parsed command line arguments
     @param logger: logging logger
     """
-    def __init__(self, args, logger, jobs=None):
+    def __init__(self, args, logger, jobs=None, not_running=True):
         self.jobs = []
         self._by_name = None
         self._last_of_each = None
+        self._args = args
+        self._logger = logger
 
         if jobs is None:
             jobs = []
@@ -442,6 +458,29 @@ class JobsList(object):
                 jobs.append(job)
         # Sort jobs, oldest first
         self.jobs = sorted(jobs, key = lambda x: x.start_time)
+
+        if not_running:
+            self._load_not_running()
+
+    def _load_not_running(self):
+        """
+        Look for jobs that have not executed at all.
+
+        To figure out which jobs _should_ be executed, we make an inventory of all the check files in
+        args.checkdir. For some jobs, not_running is an OK/WARNING status, so call the check.not_running()
+        to figure that out.
+        """
+        files = [f for f in os.listdir(self._args.checkdir) if os.path.isfile(os.path.join(self._args.checkdir, f))]
+        for this in files:
+            if not this.endswith('.ini'):
+                continue
+            name = this[:-4]  # remove the '.ini' suffix
+            if name not in self.by_name:
+                filename = os.path.join(self._args.checkdir, this)
+                self._logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
+                job = Job(name)
+                self.jobs.append(job)
+                self._by_name[name] = [Job]
 
     @property
     def by_name(self):
@@ -478,48 +517,67 @@ class Check(object):
     and used to check if a Job instance is OK or WARNING or ...
     """
 
-    def __init__(self, filename, logger):
+    def __init__(self, ok_str, warning_str, filename, logger):
         """
         Load check criteria from a file.
 
         See top-level comment in this script for syntax.
 
-        @param filename: INI file with check criterias for a specific job
         @param logger: logging logger
 
-        @type filename: string
         @type logger: logging.logger
         """
-        self.logger = logger
-        self.config = ConfigParser.ConfigParser(_check_defaults)
+        self._logger = logger
         self.filename = filename
-        if not self.config.read([filename]):
-            raise CheckLoadError('Failed reading file', filename)
-        _section = 'check'
         try:
-            self._ok_criteria = self._parse_criterias(self.config.get(_section, 'ok'))
-            self._warning_criteria = self._parse_criterias(self.config.get(_section, 'warning'))
+            self._ok_criteria = self._parse_criterias(ok_str)
+            self._warning_criteria = self._parse_criterias(warning_str)
         except CheckLoadError as exc:
             raise
         except Exception as exc:
-            logger.exception(exc)
+            logger.exception('Failed parsing criterias')
             raise CheckLoadError('Failed loading file', filename)
 
     def _parse_criterias(self, data_str):
+        """
+        Parse a full set of criterias, such as 'exit_status=0, max_age=25h'
+
+        :param data_str: Criterias
+        :return: [(what, value, negate)]
+        """
         res = []
+        self._logger.debug('Parsing criterias: {!r}'.format(data_str))
         for this in data_str.split(','):
             this = this.strip()
+            if not this:
+                continue
+            #
+            # Backwards-compat for renamed criterias
+            #
+            if this == 'not_running':
+                self._logger.warning('Criteria not_running is obsoleted by !OR_running')
+                this = '!OR_running'
+            if this.startswith('output_not_contains'):
+                # backwards compat
+                self._logger.warning('Criteria output_not_contains is obsoleted by !output_contains')
+                this = '!output_contains' + this[19:]
+
+            negate = False
+            if this.startswith('!'):
+                negate = True
+                this = this[1:]
             if '=' not in this:
                 # check for allowed single-value criteria
-                if this not in ['not_running']:
+                if this not in ['OR_running']:
+                    self._logger.debug('Unrecognized token: {!r}'.format(this))
                     raise CheckLoadError('Bad criteria: {!r}'.format(this), self.filename)
-                res += [(this, None)]
+                res += [(this, None, negate)]
                 continue
             # parse regular what=value criteria
             (what, value) = this.split('=')
             what = what.strip()
             value = value.strip()
-            res += [(what, value)]
+            res += [(what, value, negate)]
         return res
 
     def job_is_ok(self, job):
@@ -548,40 +606,50 @@ class Check(object):
 
         For each criteria `foo', look for a corresponding check_foo function and call it.
 
-        @param criterias: List of criterias to test ([('max_age', '8h')] for example)
+        @param criterias: List of criterias to test ([('max_age', '8h', False)] for example)
         @param job: The job
 
-        @type criterias: [(string, string | None)]
+        @type criterias: [(string, string | None, bool)]
         @type job: Job
 
         @returns: True or False, and a list of strings describing success/failure
         @rtype: True | string_types
         """
-        res = True
         ok_msgs = []
         fail_msgs = []
-        for this in criterias:
-            self.logger.debug('Evaluating {!r}'.format(this))
-            what, value, = this
-            name = what
-            negate = False
-            if what == 'output_not_contains':
-                # backwards compat
-                what = '!output_contains'
-            if what.startswith('!'):
-                negate = True
-                name = name[1:]
-            func = getattr(self, 'check_' + name)
-            if not func:
-                return 'unknown_criteria'
-            status, msg = func(job, value, negate)
-            self.logger.debug('Function {}({}) (negate: {}) returned: {}'.format('check_' + what, value, negate, res))
-            if msg == '':
-                # default message is the criteria as a string
-                msg = '{}={}'.format(what, value)
 
+        def separate_or(criterias):
+            """ Separate OR_ criterias from the other """
+            _or = []
+            _and = []
+            for this in criterias:
+                what, value, negate = this
+                if what.startswith('OR_'):
+                    _or += [this]
+                else:
+                    _and += [this]
+            return _or, _and
+
+        or_criterias, and_criterias = separate_or(criterias)
+
+        # First, evaluate the OR criterias. If any of them return True, we are done with this check.
+        for this in or_criterias:
+            self._logger.debug('Evaluating OR {!r}'.format(this))
+            status, msg = self._call_check(this, job)
+            if status:
+                self._logger.debug('OR criteria {} fullfilled: {}'.format(this, msg))
+                return True, [msg]
+            else:
+                fail_msgs += [msg]
+        if not and_criterias:
+            return False, fail_msgs
+
+        res = True
+        for this in and_criterias:
+            self._logger.debug('Evaluating AND {!r}'.format(this))
+            status, msg = self._call_check(this, job)
             if not status:
-                self.logger.debug("Job {!r} failed criteria {!r} with status {!r}".format(job, this, status))
+                self._logger.debug("Job {!r} failed AND criteria {!r} with status {!r}".format(job, this, status))
                 res = False
                 fail_msgs += [msg]
             else:
@@ -591,8 +659,25 @@ class Check(object):
             return True, ok_msgs
         return False, fail_msgs
 
+    def _call_check(self, criteria, job):
+        what, value, negate = criteria
+        func = getattr(self, 'check_' + what)
+        if not func:
+            return False, '{}=unknown_criteria'.format(what)
+        status, msg = func(job, value, negate)
+        self._logger.debug('Function check_{}({!r}) returned: {} {}'.format(
+            what, value, status, msg))
+        if msg == '':
+            # default message is the criteria as a string
+            neg_str = '!' if negate else ''
+            msg = '{}{}={}'.format(neg_str, what, value)
+        return status, msg
+
     # Functions named check_ are the actual criterias that can be entered in the INI files.
     # These functions should return True, False and a string describing why they succeeded or failed.
+    #
+    # Negating isn't done in _call_check because some checks formulate their message differently
+    # when they are negated.
 
     def check_exit_status(self, job, value, negate):
         """ Check if job exit status matches 'value' """
@@ -600,12 +685,12 @@ class Check(object):
         res = (job.exit_status == value)
         if negate:
             res = not res
-        reason = 'exit={}'.format(value)
-        if not res:
-            reason = 'exit={}!={}'.format(job.exit_status, value)
-            if negate:
-                reason = 'exit={}=={}'.format(job.exit_status, value)
-        return res, reason
+        if res:
+            # short message for happy-case
+            return True, 'exit={}'.format(value)
+        if negate:
+            return False, 'exit={}=={}'.format(job.exit_status, value)
+        return False, 'exit={}!={}'.format(job.exit_status, value)
 
     def check_max_age(self, job, value, negate):
         value = _parse_time_value(value)
@@ -613,35 +698,57 @@ class Check(object):
         res = (job.end_time > (now - value))
         if negate:
             res = not res
-        reason = 'age={}'.format(job.age)
-        if not res:
-            reason = 'age={}>{}'.format(job.age, _time_to_str(value))
-            if negate:
-                reason = 'age={}<={}'.format(job.age, _time_to_str(value))
-        return res, reason
+        if res:
+            # short message for happy-case
+            return True, 'age={}'.format(job.age)
+        if negate:
+            return False, 'age={}<={}'.format(job.age, _time_to_str(value))
+        return False, 'age={}>{}'.format(job.age, _time_to_str(value))
 
     def check_output_contains(self, job, value, negate):
-        res = re.match(value, job.output) is not None
+        value2 = six.b(value) if six.PY3 else value
+        res = (value2 in job.output)
         if negate:
             res = not res  # invert result
-        return res, ''
+        neg_str = '!' if negate else ''
+        return res, '{}output_contains={}={}'.format(neg_str, value, res)
 
-    def not_running(self, job):
-        """
-        Decide status for a job not running.
-        (Useful for jobs that run very seldom, so check results are purged)
+    def check_output_matches(self, job, value, negate):
+        value2 = six.b(value) if six.PY3 else value
+        res = re.match(value2, job.output) is not None
+        if negate:
+            res = not res  # invert result
+        neg_str = '!' if negate else ''
+        return res, '{}output_matches={}={}'.format(neg_str, value, res)
 
-        @param job: The job
-        @type job: Job
+    def check_OR_running(self, job, value, negate):
+        res = job.is_running
+        msg = 'is_running' if res else 'not_running'
+        if negate:
+            res = not res
+        return res, msg
 
-        @return: 'OK', 'WARNING' or 'CRITICAL'
-        @rtype: str | unicode
-        """
-        if ('not_running', None) in self._ok_criteria:
-            return 'OK'
-        if ('not_running', None) in self._warning_criteria:
-            return 'WARNING'
-        return 'CRITICAL'
+    def check_OR_file_exists(self, job, value, negate):
+        res = os.path.isfile(value)
+        msg = 'file_exists=' if res else 'file_does_not_exist='
+        msg += value
+        if negate:
+            res = not res
+        return res, msg
+
+    @classmethod
+    def from_file(cls, filename, logger):
+        config = configparser.ConfigParser(_check_defaults)
+        if not config.read([filename]):
+            raise CheckLoadError('Failed reading file', filename)
+        _section = 'check'
+        try:
+            _ok_criteria = config.get(_section, 'ok')
+            _warning_criteria = config.get(_section, 'warning')
+        except Exception as exc:
+            logger.exception(exc)
+            raise CheckLoadError('Failed loading file', filename)
+        return cls(_ok_criteria, _warning_criteria, filename, logger)
 
 
 class CheckStatus(object):
@@ -674,10 +781,14 @@ class CheckStatus(object):
         if jobs is not None:
             self.check_jobs(jobs)
 
-    def check_jobs(self, jobs, not_running=True):
+    def check_jobs(self, jobs):
         """
         Run checks on a number of jobs.
-        :param not_running: Include check of not running jobs.
+
+        Look for job execution entrys (parsed into Job() instances), group them
+        per check name and determine the status. For each group, append status
+        to one of the three aggregate status lists of this object (checks_ok,
+        checks_warning or checks_critical).
 
         :type jobs: JobsList
         :return:
@@ -686,18 +797,6 @@ class CheckStatus(object):
         self.checks_warning = []
         self.checks_critical = []
 
-        self._check_running_jobs(jobs)
-        if not_running and not self._args.cmd:
-            self._check_not_running(jobs)
-        self._last_num_checked = len(jobs.by_name)
-
-    def _check_running_jobs(self, jobs):
-        """
-        Look for job execution entrys (parsed into Job() instances), group them
-        per check name and determine the status. For each group, append status
-        to one of the three aggregate status lists of this object (checks_ok,
-        checks_warning or checks_critical).
-        """
         # determine total check status based on all logged invocations of this job
         for (name, jobs) in jobs.by_name.items():
             check = self._get_check(name)
@@ -727,35 +826,6 @@ class CheckStatus(object):
                 self.checks_warning.append(jobs_warning[-1])
             else:
                 self.checks_critical.append(jobs_critical[-1])
-
-    def _check_not_running(self, jobs):
-        """
-        Look for jobs that have not executed at all.
-
-        To figure out which jobs _should_ be executed, we make an inventory of all the check files in
-        args.checkdir. For some jobs, not_running is an OK/WARNING status, so call the check.not_running()
-        to figure that out.
-        """
-        files = [f for f in os.listdir(self._args.checkdir) if os.path.isfile(os.path.join(self._args.checkdir, f))]
-        for this in files:
-            if not this.endswith('.ini'):
-                continue
-            name = this[:-4]  # remove the '.ini' suffix
-            check = self._get_check(name)
-            if name not in jobs.by_name:
-                filename = os.path.join(self._args.checkdir, this)
-                self._logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
-                job = Job(name=name)
-                action = check.not_running(job)
-                self._logger.debug('Not running job {!r} action: {}'.format(name, action))
-                if action == 'OK':
-                    self.checks_ok.append(job)
-                elif action == 'WARNING':
-                    self.checks_warning.append(job)
-                else:
-                    self.checks_critical.append(job)
-            else:
-                self._logger.debug('Check {!r} has {!r} logged results'.format(name, len(self._jobs_by_name[name])))
 
     def _get_check(self, name):
         """
@@ -910,7 +980,7 @@ def mode_ls(args, logger):
     for this in chosen_jobs:
         if this in last_of_each:
             # For the last instance of each job, evaluate full check-mode status
-            checkstatus.check_jobs(JobsList(None, None, jobs=[this]), not_running=False)
+            checkstatus.check_jobs(JobsList(None, logger, jobs=[this]), not_running=False)
             level, msg, = checkstatus.aggregate_status()
         else:
             level = '-'
@@ -978,9 +1048,8 @@ def mode_lastlog(args, logger, fail_status=False):
 
     if len(_jobs.by_name) > 0:
         view_jobs = []
-        for (name, jobs) in _jobs.by_name.items():
-            job = jobs[-1]  # last job (any status)
-            if job.output_filename:
+        for (name, job) in _jobs.last_of_each.items():
+            if job.output_filename and os.path.isfile(job.output_filename):
                 if fail_status and job.exit_status != 0:
                     view_jobs.append(job)
                 elif not fail_status:
@@ -988,16 +1057,15 @@ def mode_lastlog(args, logger, fail_status=False):
 
         if view_jobs:
             for job in view_jobs:
-                if os.path.isfile(job.output_filename):
-                    with open(job.output_filename, 'r') as f:
-                        print '=== Script output of {!r}'.format(job)
-                        shutil.copyfileobj(f, sys.stdout)
-                        print '=== End of script output\n'
+                with open(job.output_filename, 'r') as f:
+                    print('=== Script output of {!r}'.format(job))
+                    shutil.copyfileobj(f, sys.stdout)
+                    print('=== End of script output\n')
         else:
             print('No script output found for {!s} with fail_status={!s}'.format(
-                ', '.join(jobs.by_name.keys()), fail_status))
+                ', '.join(_jobs.by_name.keys()), fail_status))
     else:
-        print "No jobs found"
+        print('No jobs found')
 
 
 def _status_summary(num_jobs, failed):
