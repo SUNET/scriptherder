@@ -776,6 +776,7 @@ class CheckStatus(object):
 
         self.checks_ok = []
         self.checks_warning = []
+        self.checks_unknown = []
         self.checks_critical = []
 
         self._checks = {}
@@ -800,14 +801,24 @@ class CheckStatus(object):
         """
         self.checks_ok = []
         self.checks_warning = []
+        self.checks_unknown = []
         self.checks_critical = []
 
         # determine total check status based on all logged invocations of this job
         for (name, these_jobs) in jobs.by_name.items():
-            check = self._get_check(name)
+            try:
+                check = self._get_check(name)
+            except CheckLoadError as exc:
+                self._logger.error('Failed loading check for {}: {}'.format(name, exc.reason))
+                this_job = these_jobs[-1]
+                this_job.check_status = 'UNKNOWN'
+                this_job.check_reason = 'Failed to load check'
+                self.checks_unknown.append(this_job)
+                continue
 
-            #self._logger.debug("Checking {!r}: {!r}".format(name, these_jobs))
-
+            # Check jobs from the tail end since it is pretty probable one
+            # will be OK or WARNING. More efficient than wading through tens or
+            # hundreds of jobs to find that the last one is OK.
             these_jobs.reverse()
 
             last = these_jobs[-1] if len(these_jobs) else None
@@ -869,7 +880,9 @@ class CheckStatus(object):
                 return 'WARNING', self.checks_warning[-1].check_reason
             if self.checks_critical:
                 return 'CRITICAL', self.checks_critical[-1].check_reason
-            return 'UNKNOWN', 'No jobs found for {!r}?'.format(self._args.cmd)
+            if self.checks_unknown:
+                return 'UNKNOWN', self.checks_unknown[-1].check_reason
+            return 'FAIL', 'No jobs found for {!r}?'.format(self._args.cmd)
 
         # When looking at multiple jobs at once, logic gets a bit reversed - if ANY
         # job invocation is CRITICAL/WARNING, the aggregate message given to
@@ -878,6 +891,8 @@ class CheckStatus(object):
             return 'CRITICAL', _status_summary(self.num_jobs, self.checks_critical)
         if self.checks_warning:
             return 'WARNING', _status_summary(self.num_jobs, self.checks_warning)
+        if self.checks_unknown:
+            return 'UNKNOWN', _status_summary(self.num_jobs, self.checks_unknown)
         if self.checks_ok:
             return 'OK', _status_summary(self.num_jobs, self.checks_ok)
         return 'UNKNOWN', 'No jobs found?'
