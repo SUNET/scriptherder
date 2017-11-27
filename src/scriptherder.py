@@ -233,7 +233,7 @@ class Job(object):
         """
         if 'start_time' not in self._data:
             return None
-        return int(self._data['start_time'])
+        return float(self._data['start_time'])
 
     @property
     def end_time(self):
@@ -244,7 +244,7 @@ class Job(object):
         """
         if 'end_time' not in self._data:
             return None
-        return int(self._data['end_time'])
+        return float(self._data['end_time'])
 
     @property
     def duration_str(self):
@@ -433,7 +433,7 @@ class JobsList(object):
     @param args: Parsed command line arguments
     @param logger: logging logger
     """
-    def __init__(self, args, logger, jobs=None, not_running=True):
+    def __init__(self, args, logger, jobs=None, load_not_running=True):
         self.jobs = []
         self._by_name = None
         self._last_of_each = None
@@ -459,7 +459,7 @@ class JobsList(object):
         # Sort jobs, oldest first
         self.jobs = sorted(jobs, key = lambda x: x.start_time)
 
-        if not_running:
+        if load_not_running:
             self._load_not_running()
 
     def _load_not_running(self):
@@ -475,6 +475,11 @@ class JobsList(object):
             if not this.endswith('.ini'):
                 continue
             name = this[:-4]  # remove the '.ini' suffix
+            if self._args.cmd and self._args.cmd != ['ALL']:
+                if name not in self._args.cmd:
+                    self._logger.debug('Skipping not-running {!r} not matching {!r} (file {!s})'.format(
+                        name, self._args.cmd, this))
+                    continue
             if name not in self.by_name:
                 filename = os.path.join(self._args.checkdir, this)
                 self._logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
@@ -519,7 +524,7 @@ class Check(object):
 
     def __init__(self, ok_str, warning_str, filename, logger):
         """
-        Load check criteria from a file.
+        Check criterias typically loaded from a file (using Check.from_file).
 
         See top-level comment in this script for syntax.
 
@@ -554,13 +559,14 @@ class Check(object):
             #
             # Backwards-compat for renamed criterias
             #
-            if this == 'not_running':
-                self._logger.warning('Criteria not_running is obsoleted by !OR_running')
-                this = '!OR_running'
-            if this.startswith('output_not_contains'):
-                # backwards compat
-                self._logger.warning('Criteria output_not_contains is obsoleted by !output_contains')
-                this = '!output_contains' + this[19:]
+            replace = {'not_running': '!OR_running',
+                       'output_not_contains': '!output_contains',
+                       }
+            for old, new in replace.items():
+                if this == old or this.startswith(old + '='):
+                    self._logger.warning('Criteria {!r} in file {} is obsoleted by {!r}'.format(
+                        old, self.filename, new))
+                    this = new + this[len(old):]
 
             negate = False
             if this.startswith('!'):
@@ -798,16 +804,16 @@ class CheckStatus(object):
         self.checks_critical = []
 
         # determine total check status based on all logged invocations of this job
-        for (name, jobs) in jobs.by_name.items():
+        for (name, these_jobs) in jobs.by_name.items():
             check = self._get_check(name)
 
-            self._logger.debug("Checking {!r}: {!r}".format(name, jobs))
+            self._logger.debug("Checking {!r}: {!r}".format(name, these_jobs))
 
             jobs_ok = []
             jobs_warning = []
             jobs_critical = []
-            for job in jobs:
-                job.check(check)
+            for job in these_jobs:
+                job.check(check, self._logger)
                 if job.is_ok():
                     jobs_ok.append(job)
                 elif job.is_warning():
@@ -826,6 +832,7 @@ class CheckStatus(object):
                 self.checks_warning.append(jobs_warning[-1])
             else:
                 self.checks_critical.append(jobs_critical[-1])
+        self._last_num_checked = len(jobs.by_name)
 
     def _get_check(self, name):
         """
@@ -839,7 +846,7 @@ class CheckStatus(object):
             check_filename = os.path.join(self._args.checkdir, name + '.ini')
             self._logger.debug('Loading check definition from {!r}'.format(check_filename))
             try:
-                self._checks[name] = Check(check_filename, self._logger)
+                self._checks[name] = Check.from_file(check_filename, self._logger)
             except ScriptHerderError as exc:
                 raise CheckLoadError('Failed loading check', filename = check_filename)
 
@@ -980,7 +987,8 @@ def mode_ls(args, logger):
     for this in chosen_jobs:
         if this in last_of_each:
             # For the last instance of each job, evaluate full check-mode status
-            checkstatus.check_jobs(JobsList(None, logger, jobs=[this]), not_running=False)
+            temp_jobs = JobsList(None, logger, jobs=[this], load_not_running=False)
+            checkstatus.check_jobs(temp_jobs)
             level, msg, = checkstatus.aggregate_status()
         else:
             level = '-'
@@ -1003,8 +1011,10 @@ def mode_ls(args, logger):
             level = level,
             msg = msg,
         )
-        start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
-        print('{start}  {duration:>6}  {status}  name={name:<25}  {filename}'.format(
+        start = '***'
+        if this.start_time:
+            start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
+        print('{start:>19s}  {duration:>7}  {status}  name={name:<25}  {filename}'.format(
             start = start,
             duration = this.duration_str,
             status = status,

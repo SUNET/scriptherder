@@ -113,6 +113,13 @@ class TestChecks(unittest.TestCase):
         self.assertTrue(self.job.is_ok())
         self.assertEqual(self.job.check_reason, 'exit=0, !output_contains=ERROR=True')
 
+    def test_obsolete_output_not_contains(self):
+        """ Test obsolete option output_not_contains """
+        self._run(['/bin/echo', 'STATUS_TESTING_OK'],
+                  ok = 'exit_status=0,output_not_contains=ERROR')
+        self.assertTrue(self.job.is_ok())
+        self.assertEqual(self.job.check_reason, 'exit=0, !output_contains=ERROR=True')
+
     def test_output_matches(self):
         """ Test output_matches criteria """
         self._run(['/bin/echo', 'STATUS_TESTING_OK'],
