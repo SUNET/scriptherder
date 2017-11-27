@@ -69,7 +69,6 @@ than eight hours ago, WARNING if less than 24 and after that CRITICAL:
 
 import os
 import re
-import six
 import sys
 import shutil
 import time
@@ -78,6 +77,8 @@ import logging
 import logging.handlers
 import argparse
 import subprocess
+
+import six
 from six.moves import configparser
 
 _defaults = {'debug': False,
@@ -139,7 +140,7 @@ class Job(object):
             data['name'] = os.path.basename(cmd[0])
 
         if data.get('version') not in [1, 2]:
-            raise JobLoadError('Unknown version: {!r}'.format(data.get('version')), filename=filename)
+            raise JobLoadError('Unknown version: {!r}'.format(data.get('version')), filename=data['filename'])
 
         # Output of command is saved outside self._data between execution and save
         self._output = None
@@ -372,6 +373,7 @@ class Job(object):
         Figure out status of this job, based on it's check criterias.
 
         :type check: Check
+        :type logger: logging.logger
         :return: None
         """
         status, msg = check.job_is_ok(self)
@@ -380,7 +382,7 @@ class Job(object):
             self.check_status = 'OK'
             self.check_reason = ', '.join(msg)
         else:
-            status,warn_msg = check.job_is_warning(self)
+            status, warn_msg = check.job_is_warning(self)
             logger.debug('Warning check result: {} {}'.format(status, warn_msg))
             msg += warn_msg
             if status is True:
@@ -391,10 +393,10 @@ class Job(object):
                 self.check_reason = ', '.join(msg)
 
     def is_ok(self):
-        return (self.check_status == 'OK')
+        return self.check_status == 'OK'
 
     def is_warning(self):
-        return (self.check_status == 'WARNING')
+        return self.check_status == 'WARNING'
 
     @property
     def is_running(self):
@@ -536,9 +538,9 @@ class Check(object):
         try:
             self._ok_criteria = self._parse_criterias(ok_str)
             self._warning_criteria = self._parse_criterias(warning_str)
-        except CheckLoadError as exc:
+        except CheckLoadError:
             raise
-        except Exception as exc:
+        except Exception:
             logger.exception('Failed parsing criterias')
             raise CheckLoadError('Failed loading file', filename)
 
@@ -628,7 +630,7 @@ class Check(object):
             _or = []
             _and = []
             for this in criterias:
-                what, value, negate = this
+                what, _value, _negate = this
                 if what.startswith('OR_'):
                     _or += [this]
                 else:
@@ -726,14 +728,14 @@ class Check(object):
         neg_str = '!' if negate else ''
         return res, '{}output_matches={}={}'.format(neg_str, value, res)
 
-    def check_OR_running(self, job, value, negate):
+    def check_OR_running(self, job, _value, negate):
         res = job.is_running
         msg = 'is_running' if res else 'not_running'
         if negate:
             res = not res
         return res, msg
 
-    def check_OR_file_exists(self, job, value, negate):
+    def check_OR_file_exists(self, _job, value, negate):
         res = os.path.isfile(value)
         msg = 'file_exists=' if res else 'file_does_not_exist='
         msg += value
@@ -821,7 +823,7 @@ class CheckStatus(object):
             # hundreds of jobs to find that the last one is OK.
             these_jobs.reverse()
 
-            last = these_jobs[-1] if len(these_jobs) else None
+            last = these_jobs[-1] if these_jobs else None
             for job in these_jobs:
                 self._logger.debug("Checking {!r}: {!r}".format(name, job))
                 job.check(check, self._logger)
@@ -849,7 +851,7 @@ class CheckStatus(object):
             self._logger.debug('Loading check definition from {!r}'.format(check_filename))
             try:
                 self._checks[name] = Check.from_file(check_filename, self._logger)
-            except ScriptHerderError as exc:
+            except ScriptHerderError:
                 raise CheckLoadError('Failed loading check', filename = check_filename)
 
         return self._checks[name]
@@ -988,7 +990,6 @@ def mode_ls(args, logger):
         chosen_jobs = jobs.jobs
 
     checkstatus = CheckStatus(args, logger)
-    now = int(time.time())
 
     for this in chosen_jobs:
         if this in last_of_each:
@@ -1059,12 +1060,13 @@ def mode_lastlog(args, logger, fail_status=False):
 
     @param args: Parsed command line arguments
     @param logger: logging logger
+    @param fail_status: Show last failed log if True
     """
     _jobs = JobsList(args, logger)
 
-    if len(_jobs.by_name) > 0:
+    if _jobs.by_name:
         view_jobs = []
-        for (name, job) in _jobs.last_of_each.items():
+        for (_name, job) in _jobs.last_of_each.items():
             if job.output_filename and os.path.isfile(job.output_filename):
                 if fail_status and job.exit_status != 0:
                     view_jobs.append(job)
@@ -1192,9 +1194,8 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
         return mode_lastlog(args, logger)
     elif args.mode == 'lastfaillog':
         return mode_lastlog(args, logger, fail_status=True)
-    else:
-        logger.error("Invalid mode {!r}".format(args.mode))
-        return False
+    logger.error('Invalid mode {!r}'.format(args.mode))
+    return False
 
 
 if __name__ == '__main__':
