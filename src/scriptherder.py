@@ -806,31 +806,23 @@ class CheckStatus(object):
         for (name, these_jobs) in jobs.by_name.items():
             check = self._get_check(name)
 
-            self._logger.debug("Checking {!r}: {!r}".format(name, these_jobs))
+            #self._logger.debug("Checking {!r}: {!r}".format(name, these_jobs))
 
-            jobs_ok = []
-            jobs_warning = []
-            jobs_critical = []
+            these_jobs.reverse()
+
+            last = these_jobs[-1] if len(these_jobs) else None
             for job in these_jobs:
+                self._logger.debug("Checking {!r}: {!r}".format(name, job))
                 job.check(check, self._logger)
                 if job.is_ok():
-                    jobs_ok.append(job)
+                    self.checks_ok.append(job)
+                    break
                 elif job.is_warning():
-                    jobs_warning.append(job)
-                else:
-                    jobs_critical.append(job)
+                    self.checks_warning.append(job)
+                    break
+                elif job == last:
+                    self.checks_critical.append(job)
 
-            self._logger.debug("Raw status OK      : {!r}".format(jobs_ok))
-            self._logger.debug("Raw status WARN    : {!r}".format(jobs_warning))
-            self._logger.debug("Raw status CRITICAL: {!r}".format(jobs_critical))
-
-            # add most recent job status to the totals
-            if jobs_ok:
-                self.checks_ok.append(jobs_ok[-1])
-            elif jobs_warning:
-                self.checks_warning.append(jobs_warning[-1])
-            else:
-                self.checks_critical.append(jobs_critical[-1])
         self._last_num_checked = len(jobs.by_name)
 
     def _get_check(self, name):
