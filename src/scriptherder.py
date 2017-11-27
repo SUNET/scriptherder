@@ -369,11 +369,10 @@ class Job(object):
 
     def check(self, check, logger):
         """
-
-        :param check: The check to evaluate this job against.
+        Figure out status of this job, based on it's check criterias.
 
         :type check: Check
-        :return:
+        :return: None
         """
         status, msg = check.job_is_ok(self)
         logger.debug('OK check result: {} {}'.format(status, msg))
@@ -485,7 +484,7 @@ class JobsList(object):
                 self._logger.debug('Check {!r} (filename {!r}) not found in jobs'.format(name, filename))
                 job = Job(name)
                 self.jobs.append(job)
-                self._by_name[name] = [Job]
+                self._by_name[name] = [job]
 
     @property
     def by_name(self):
@@ -1036,7 +1035,7 @@ def mode_check(args, logger):
     """
 
     try:
-        status = CheckStatus(args, logger)
+        status = CheckStatus(args, logger, JobsList(args, logger))
     except CheckLoadError as exc:
         print("UNKNOWN: Failed loading check from file '{!s}' ({!s})".format(exc.filename, exc.reason))
         return exit_status['UNKNOWN']
