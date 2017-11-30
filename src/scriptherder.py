@@ -723,14 +723,14 @@ class Check(object):
         return False, 'age={}>{}'.format(job.age, _time_to_str(value))
 
     def check_output_contains(self, job, value, negate):
-        res = (_to_bytes(value) in job.output)
+        res = (_to_bytes(value) in _to_bytes(job.output))
         if negate:
             res = not res  # invert result
         neg_str = '!' if negate else ''
         return res, '{}output_contains={}={}'.format(neg_str, value, res)
 
     def check_output_matches(self, job, value, negate):
-        res = re.match(_to_bytes(value), job.output) is not None
+        res = re.match(_to_bytes(value), _to_bytes(job.output)) is not None
         if negate:
             res = not res  # invert result
         neg_str = '!' if negate else ''
@@ -1158,7 +1158,10 @@ def _time_to_str(value):
 def _to_bytes(data):
     if sys.version_info[0] == 2:
         return data
-    return data.encode('latin-1')
+    try:
+        return data.encode('latin-1')
+    except AttributeError:
+        return data
 
 
 def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):
