@@ -78,8 +78,18 @@ import logging.handlers
 import argparse
 import subprocess
 
-import six
-from six.moves import configparser
+# Try really hard to not have to depend on any non-standard modules
+try:
+    from six import string_types
+    from six.moves.configparser import ConfigParser
+except ImportError:
+    if sys.version_info[0] == 2:
+        string_types = basestring
+        from ConfigParser import ConfigParser
+    if sys.version_info[0] == 3:
+        string_types = str
+        from configparser import ConfigParser
+
 
 _defaults = {'debug': False,
              'syslog': False,
@@ -130,7 +140,7 @@ class Job(object):
         if cmd is None:
             cmd = []
         for x in cmd:
-            assert(isinstance(x, six.string_types))
+            assert(isinstance(x, string_types))
         if data is None:
             data = {'version': 2,
                     'name': name,
@@ -713,16 +723,14 @@ class Check(object):
         return False, 'age={}>{}'.format(job.age, _time_to_str(value))
 
     def check_output_contains(self, job, value, negate):
-        value2 = six.b(value) if six.PY3 else value
-        res = (value2 in job.output)
+        res = (_to_bytes(value) in job.output)
         if negate:
             res = not res  # invert result
         neg_str = '!' if negate else ''
         return res, '{}output_contains={}={}'.format(neg_str, value, res)
 
     def check_output_matches(self, job, value, negate):
-        value2 = six.b(value) if six.PY3 else value
-        res = re.match(value2, job.output) is not None
+        res = re.match(_to_bytes(value), job.output) is not None
         if negate:
             res = not res  # invert result
         neg_str = '!' if negate else ''
@@ -745,7 +753,7 @@ class Check(object):
 
     @classmethod
     def from_file(cls, filename, logger):
-        config = configparser.ConfigParser(_check_defaults)
+        config = ConfigParser(_check_defaults)
         if not config.read([filename]):
             raise CheckLoadError('Failed reading file', filename)
         _section = 'check'
@@ -1145,6 +1153,12 @@ def _time_to_str(value):
         return '{!s}h'.format(int(value / 3600))
     days = int(value / 86400)
     return '{!s}d{!s}h'.format(days, int((value % 86400) / 3600))
+
+
+def _to_bytes(data):
+    if sys.version_info[0] == 2:
+        return data
+    return data.encode('latin-1')
 
 
 def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):
