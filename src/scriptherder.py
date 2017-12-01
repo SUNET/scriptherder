@@ -1074,7 +1074,7 @@ def mode_lastlog(args, logger, fail_status=False):
 
     if _jobs.by_name:
         view_jobs = []
-        for (_name, job) in _jobs.last_of_each.items():
+        for job in _jobs.last_of_each:
             if job.output_filename and os.path.isfile(job.output_filename):
                 if fail_status and job.exit_status != 0:
                     view_jobs.append(job)
