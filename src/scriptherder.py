@@ -443,6 +443,9 @@ class JobsList(object):
 
     @param args: Parsed command line arguments
     @param logger: logging logger
+    @param jobs: List of jobs
+
+    @type jobs: [Job]
     """
     def __init__(self, args, logger, jobs=None, load_not_running=True):
         self.jobs = []
@@ -777,7 +780,7 @@ class CheckStatus(object):
       checks_critical: List of checks in CRITICAL state ([Job()]).
     """
 
-    def __init__(self, args, logger, jobs=None):
+    def __init__(self, args, logger, jobs=None, checks=None):
         """
         @param args: Parsed command line arguments
         @param logger: logging logger
@@ -789,7 +792,7 @@ class CheckStatus(object):
         self.checks_unknown = []
         self.checks_critical = []
 
-        self._checks = {}
+        self._checks = {} if checks is None else checks
         self._args = args
         self._logger = logger
         self._last_num_checked = None
@@ -826,12 +829,11 @@ class CheckStatus(object):
                 self.checks_unknown.append(this_job)
                 continue
 
-            # Check jobs from the tail end since it is pretty probable one
+            # Check most recent job first since it is pretty probable one
             # will be OK or WARNING. More efficient than wading through tens or
             # hundreds of jobs to find that the last one is OK.
             these_jobs.reverse()
 
-            last = these_jobs[-1] if these_jobs else None
             for job in these_jobs:
                 self._logger.debug("Checking {!r}: {!r}".format(name, job))
                 job.check(check, self._logger)
@@ -841,7 +843,7 @@ class CheckStatus(object):
                 elif job.is_warning():
                     self.checks_warning.append(job)
                     break
-                elif job == last:
+                elif job == these_jobs[-1]:
                     self.checks_critical.append(job)
 
         self._last_num_checked = len(jobs.by_name)
