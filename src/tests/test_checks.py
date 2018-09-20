@@ -104,32 +104,32 @@ class TestChecks(unittest.TestCase):
         self._run(['/bin/echo', 'STATUS_TESTING_OK'],
                   ok = 'exit_status=0,output_contains=TESTING')
         self.assertTrue(self.job.is_ok())
-        self.assertEqual(self.job.check_reason, 'exit=0, output_contains=TESTING=True')
+        self.assertEqual(self.job.check_reason, 'exit=0, output_contains=TESTING==True')
 
     def test_output_contains_negated(self):
         """ Test output_contains criteria (negated) """
         self._run(['/bin/echo', 'STATUS_TESTING_OK'],
                   ok = 'exit_status=0,!output_contains=ERROR')
         self.assertTrue(self.job.is_ok())
-        self.assertEqual(self.job.check_reason, 'exit=0, !output_contains=ERROR=True')
+        self.assertEqual(self.job.check_reason, 'exit=0, !output_contains=ERROR==True')
 
     def test_obsolete_output_not_contains(self):
         """ Test obsolete option output_not_contains """
         self._run(['/bin/echo', 'STATUS_TESTING_OK'],
                   ok = 'exit_status=0,output_not_contains=ERROR')
         self.assertTrue(self.job.is_ok())
-        self.assertEqual(self.job.check_reason, 'exit=0, !output_contains=ERROR=True')
+        self.assertEqual(self.job.check_reason, 'exit=0, !output_contains=ERROR==True')
 
     def test_output_matches(self):
         """ Test output_matches criteria """
         self._run(['/bin/echo', 'STATUS_TESTING_OK'],
                   ok = 'exit_status=0,output_matches=.*TESTING.*')
         self.assertTrue(self.job.is_ok())
-        self.assertEqual(self.job.check_reason, 'exit=0, output_matches=.*TESTING.*=True')
+        self.assertEqual(self.job.check_reason, 'exit=0, output_matches=.*TESTING.*==True')
 
     def test_output_matches_negated(self):
         """ Test output_matches criteria (negated) """
         self._run(['/bin/echo', 'STATUS_TESTING_OK'],
                   ok = 'exit_status=0,!output_matches=.*ERROR.*')
         self.assertTrue(self.job.is_ok())
-        self.assertEqual(self.job.check_reason, 'exit=0, !output_matches=.*ERROR.*=True')
+        self.assertEqual(self.job.check_reason, 'exit=0, !output_matches=.*ERROR.*==True')

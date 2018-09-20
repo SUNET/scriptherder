@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Copyright 2014, 2015, 2017 SUNET. All rights reserved.
+# Copyright 2014, 2015, 2017, 2018 SUNET. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without modification, are
 # permitted provided that the following conditions are met:
@@ -78,6 +78,8 @@ import logging.handlers
 import argparse
 import subprocess
 
+from datetime import datetime
+
 # Try really hard to not have to depend on any non-standard modules
 try:
     from six import string_types
@@ -154,10 +156,6 @@ class Job(object):
 
         # Output of command is saved outside self._data between execution and save
         self._output = None
-
-        # The check verdict for this job
-        self.check_status = None
-        self.check_reason = None
 
         self._data = data
 
@@ -320,6 +318,32 @@ class Job(object):
         """
         return self._data.get('output_filename')
 
+    @property
+    def check_status(self):
+        """
+        The check verdict for this job, if checked ('OK', 'WARNING', ...)
+        :rtype: string | None
+        """
+        return self._data.get('check_status', None)
+
+    @check_status.setter
+    def check_status(self, value):
+        if value not in exit_status:
+            raise ValueError('Unknown check_status {!r}'.format(value))
+        self._data['check_status'] = value
+
+    @property
+    def check_reason(self):
+        """
+        Text reason for check verdict for this job, if checked.
+        :rtype: string | None
+        """
+        return self._data.get('check_reason', None)
+
+    @check_reason.setter
+    def check_reason(self, value):
+        self._data['check_reason'] = value
+
     def run(self):
         """
         Run script, storing various aspects of the results.
@@ -336,6 +360,7 @@ class Job(object):
         self._data['exit_status'] = proc.returncode
         self._data['pid'] = proc.pid
         self._output = stdout
+        return self
 
     def save_to_file(self, datadir, logger, filename=None):
         """
@@ -356,9 +381,12 @@ class Job(object):
                     fn += x
                 else:
                     fn += '_'
-            filename = '{!s}_{!s}_{!s}'.format(fn, self.start_time, self.pid)
+            _ts = datetime.fromtimestamp(self.start_time)
+            _time_str = '{!s}.{:03}'.format(datetime.fromtimestamp(self.start_time).strftime('%Y%m%dT%H%M%S'),
+                                            _ts.microsecond)
+            filename = '{}__ts-{}_pid-{}'.format(fn, _time_str, self.pid)
         fn = os.path.join(datadir, filename)
-        logger.debug("Saving job metadata to file {!r}.tmp".format(fn))
+        logger.debug('Saving job metadata to file {!r}.tmp'.format(fn))
         output_fn = fn + '_output'
         f = open(fn + '.tmp', 'w')
         if self._output is not None:
@@ -394,13 +422,9 @@ class Job(object):
         else:
             status, warn_msg = check.job_is_warning(self)
             logger.debug('Warning check result: {} {}'.format(status, warn_msg))
-            msg += warn_msg
-            if status is True:
-                self.check_status = 'WARNING'
-                self.check_reason = ', '.join(msg)
-            else:
-                self.check_status = 'CRITICAL'
-                self.check_reason = ', '.join(msg)
+            msg += [x for x in warn_msg if x not in msg]
+            self.check_status = 'WARNING' if status is True else 'CRITICAL'
+            self.check_reason = ', '.join(msg)
 
     def is_ok(self):
         return self.check_status == 'OK'
@@ -465,6 +489,7 @@ class JobsList(object):
                     job = Job.from_file(filename)
                 except JobLoadError as exc:
                     logger.warning('Failed loading job file {!r} ({!s})'.format(exc.filename, exc.reason))
+                    continue
                 if args.cmd and args.cmd != ['ALL']:
                     if job.name not in args.cmd:
                         logger.debug('Skipping {!r} not matching {!r} (file {!s})'.format(job.name, args.cmd, filename))
@@ -719,8 +744,8 @@ class Check(object):
         if negate:
             res = not res
         if res:
-            # short message for happy-case
-            return True, 'age={}'.format(job.age)
+            # No message for happy-case
+            return True, ''
         if negate:
             return False, 'age={}<={}'.format(job.age, _time_to_str(value))
         return False, 'age={}>{}'.format(job.age, _time_to_str(value))
@@ -730,14 +755,14 @@ class Check(object):
         if negate:
             res = not res  # invert result
         neg_str = '!' if negate else ''
-        return res, '{}output_contains={}={}'.format(neg_str, value, res)
+        return res, '{}output_contains={}=={}'.format(neg_str, value, res)
 
     def check_output_matches(self, job, value, negate):
         res = re.match(_to_bytes(value), _to_bytes(job.output)) is not None
         if negate:
             res = not res  # invert result
         neg_str = '!' if negate else ''
-        return res, '{}output_matches={}={}'.format(neg_str, value, res)
+        return res, '{}output_matches={}=={}'.format(neg_str, value, res)
 
     def check_OR_running(self, job, _value, negate):
         res = job.is_running
@@ -819,8 +844,9 @@ class CheckStatus(object):
 
         # determine total check status based on all logged invocations of this job
         for (name, these_jobs) in jobs.by_name.items():
+            self._logger.debug('')
             try:
-                check = self._get_check(name)
+                check = self.get_check(name)
             except CheckLoadError as exc:
                 self._logger.error('Failed loading check for {}: {}'.format(name, exc.reason))
                 this_job = these_jobs[-1]
@@ -834,21 +860,31 @@ class CheckStatus(object):
             # hundreds of jobs to find that the last one is OK.
             these_jobs.reverse()
 
+            matched = False
             for job in these_jobs:
                 self._logger.debug("Checking {!r}: {!r}".format(name, job))
                 job.check(check, self._logger)
+                self._logger.debug('Checking for OK status')
                 if job.is_ok():
+                    self._logger.debug('Job status is OK')
                     self.checks_ok.append(job)
+                    matched = True
                     break
-                elif job.is_warning():
-                    self.checks_warning.append(job)
-                    break
-                elif job == these_jobs[-1]:
-                    self.checks_critical.append(job)
+                else:
+                    self._logger.debug('Checking for WARNING status')
+                    if job.is_warning():
+                        self._logger.debug('Job status is WARNING')
+                        self.checks_warning.append(job)
+                        matched = True
+                        break
+
+            if not matched:
+                self._logger.debug('Concluding CRITICAL status')
+                self.checks_critical.append(these_jobs[0])
 
         self._last_num_checked = len(jobs.by_name)
 
-    def _get_check(self, name):
+    def get_check(self, name):
         """
         Load and cache the evaluation criterias for this job.
 
@@ -979,6 +1015,16 @@ def mode_wrap(args, logger):
     job.run()
     logger.debug("Finished, exit status {!r}".format(job.exit_status))
     logger.debug("Job output:\n{!s}".format(job.output))
+    # Record what the jobs status evaluates to at the time of execution
+    checkstatus = CheckStatus(args, logger)
+    try:
+        check = checkstatus.get_check(job.name)
+    except CheckLoadError:
+        check = None
+    if check:
+        job.check(check, logger)
+        level = logging.INFO if job.is_ok() else logging.WARNING
+        logger.log(level, 'Job {!r} check status is {} ({})'.format(job.name, job.check_status, job.check_reason))
     job.save_to_file(args.datadir, logger)
     return True
 
@@ -1031,10 +1077,11 @@ def mode_ls(args, logger):
         start = '***'
         if this.start_time:
             start = time.strftime('%Y-%m-%d %X', time.localtime(this.start_time))
-        print('{start:>19s}  {duration:>7}  {status}  name={name:<25}  {filename}'.format(
+        print('{start:>19s}  {duration:>7}  {age:>9}  {status}  name={name:<25}  {filename}'.format(
             start = start,
             duration = this.duration_str,
             status = status,
+            age = this.age + ' ago',
             name = this.name,
             filename = this.filename,
         ))
@@ -1053,7 +1100,7 @@ def mode_check(args, logger):
     """
 
     try:
-        status = CheckStatus(args, logger, JobsList(args, logger))
+        status = CheckStatus(args, logger, jobs=JobsList(args, logger))
     except CheckLoadError as exc:
         print("UNKNOWN: Failed loading check from file '{!s}' ({!s})".format(exc.filename, exc.reason))
         return exit_status['UNKNOWN']
@@ -1100,9 +1147,7 @@ def _status_summary(num_jobs, failed):
     """
     String format routine used in output of checks status.
     """
-    plural = ''
-    if len(failed) != 1:
-        plural = 's'
+    plural = 's' if num_jobs != 1 else ''
 
     summary = ', '.join(sorted([str(x.status_summary()) for x in failed]))
     return '{jobs}/{num_jobs} job{plural} in this state: {summary}'.format(
@@ -1146,7 +1191,7 @@ def _time_to_str(value):
     """
     if value < 1:
         # milliseconds
-        return '{:0.1f}ms'.format(value * 1000)
+        return '{!s}ms'.format(int(value * 1000))
     if value < 60:
         return '{!s}s'.format(int(value))
     if value < 3600:
@@ -1191,12 +1236,17 @@ def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults
         logging.basicConfig(level = level, stream = sys.stderr,
                             format = '%(asctime)s: %(threadName)s %(levelname)s %(message)s')
         logger = logging.getLogger(myname)
+    # If stderr is not a TTY, change the log level of the StreamHandler (stream = sys.stderr above) to ERROR
+    if not sys.stderr.isatty() and not args.debug:
+        for this_h in logging.getLogger('').handlers:
+            this_h.setLevel(logging.ERROR)
     if args.debug:
         logger.setLevel(logging.DEBUG)
     if args.syslog:
         syslog_h = logging.handlers.SysLogHandler()
         formatter = logging.Formatter('%(name)s: %(levelname)s %(message)s')
         syslog_h.setFormatter(formatter)
+        syslog_h.setLevel(logging.INFO)
         logger.addHandler(syslog_h)
 
     if args.name and args.mode != 'wrap':
