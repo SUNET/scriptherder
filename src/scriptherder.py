@@ -425,6 +425,7 @@ class Job(object):
             msg += [x for x in warn_msg if x not in msg]
             self.check_status = 'WARNING' if status is True else 'CRITICAL'
             self.check_reason = ', '.join(msg)
+        logger.debug('Stored check status {}, {}'.format(self.check_status, self.check_reason))
 
     def is_ok(self):
         return self.check_status == 'OK'
@@ -561,7 +562,7 @@ class Check(object):
     and used to check if a Job instance is OK or WARNING or ...
     """
 
-    def __init__(self, ok_str, warning_str, filename, logger):
+    def __init__(self, ok_str, warning_str, filename, logger, runtime_mode):
         """
         Check criterias typically loaded from a file (using Check.from_file).
 
@@ -574,15 +575,18 @@ class Check(object):
         self._logger = logger
         self.filename = filename
         try:
-            self._ok_criteria = self._parse_criterias(ok_str)
-            self._warning_criteria = self._parse_criterias(warning_str)
+            self._ok_criteria = self._parse_criterias(ok_str, runtime_mode)
+            self._warning_criteria = self._parse_criterias(warning_str, runtime_mode)
         except CheckLoadError:
             raise
         except Exception:
             logger.exception('Failed parsing criterias')
             raise CheckLoadError('Failed loading file', filename)
+        if not runtime_mode:
+            self._ok_criteria += [('stored_status', 'OK', False)]
 
-    def _parse_criterias(self, data_str):
+
+    def _parse_criterias(self, data_str, runtime_mode):
         """
         Parse a full set of criterias, such as 'exit_status=0, max_age=25h'
 
@@ -622,6 +626,10 @@ class Check(object):
             (what, value) = this.split('=')
             what = what.strip()
             value = value.strip()
+            is_runtime_check = what not in ['max_age', 'OR_file_exists']
+            if runtime_mode != is_runtime_check:
+                self._logger.debug('Skipping criteria {} for runtime_mode={}'.format(this, runtime_mode))
+                continue
             res += [(what, value, negate)]
         return res
 
@@ -633,7 +641,7 @@ class Check(object):
 
         @rtype: bool, list
         """
-        return self._evaluate(self._ok_criteria, job)
+        return self._evaluate('OK', self._ok_criteria, job)
 
     def job_is_warning(self, job):
         """
@@ -643,17 +651,19 @@ class Check(object):
 
         @rtype: bool, list
         """
-        return self._evaluate(self._warning_criteria, job)
+        return self._evaluate('warning', self._warning_criteria, job)
 
-    def _evaluate(self, criterias, job):
+    def _evaluate(self, name, criterias, job):
         """
         The actual evaluation engine.
 
         For each criteria `foo', look for a corresponding check_foo function and call it.
 
+        @param name: Name of criterias, used for logging only
         @param criterias: List of criterias to test ([('max_age', '8h', False)] for example)
         @param job: The job
 
+        @type name: string
         @type criterias: [(string, string | None, bool)]
         @type job: Job
 
@@ -679,10 +689,10 @@ class Check(object):
 
         # First, evaluate the OR criterias. If any of them return True, we are done with this check.
         for this in or_criterias:
-            self._logger.debug('Evaluating OR {!r}'.format(this))
+            self._logger.debug('Evaluating {!r} condition OR {!s}'.format(name, _criteria_to_str(this)))
             status, msg = self._call_check(this, job)
             if status:
-                self._logger.debug('OR criteria {} fullfilled: {}'.format(this, msg))
+                self._logger.debug('{!r} OR criteria {} fullfilled: {}'.format(name, this, msg))
                 return True, [msg]
             else:
                 fail_msgs += [msg]
@@ -691,15 +701,17 @@ class Check(object):
 
         res = True
         for this in and_criterias:
-            self._logger.debug('Evaluating AND {!r}'.format(this))
+            self._logger.debug('Evaluating {!r} condition AND {!s}'.format(name, _criteria_to_str(this)))
             status, msg = self._call_check(this, job)
             if not status:
-                self._logger.debug("Job {!r} failed AND criteria {!r} with status {!r}".format(job, this, status))
+                self._logger.debug('Job {!r} failed {!r} AND criteria {!r} with status {!r}'.format(
+                    job, name, this, status))
                 res = False
                 fail_msgs += [msg]
             else:
                 ok_msgs += [msg]
 
+        self._logger.debug('Check {!r} result: {!r}, messages: {!r} / {!r}'.format(name, res, ok_msgs, fail_msgs))
         if res:
             return True, ok_msgs
         return False, fail_msgs
@@ -779,8 +791,15 @@ class Check(object):
             res = not res
         return res, msg
 
+    def check_stored_status(self, job, value, negate):
+        res = job.check_status == value
+        if negate:
+            res = not res  # invert result
+        neg_str = '!' if negate else ''
+        return res, '{}stored_status={}=={}'.format(neg_str, value, res)
+
     @classmethod
-    def from_file(cls, filename, logger):
+    def from_file(cls, filename, logger, runtime_mode=False):
         config = ConfigParser(_check_defaults)
         if not config.read([filename]):
             raise CheckLoadError('Failed reading file', filename)
@@ -791,7 +810,7 @@ class Check(object):
         except Exception as exc:
             logger.exception(exc)
             raise CheckLoadError('Failed loading file', filename)
-        return cls(_ok_criteria, _warning_criteria, filename, logger)
+        return cls(_ok_criteria, _warning_criteria, filename, logger, runtime_mode)
 
 
 class CheckStatus(object):
@@ -805,10 +824,11 @@ class CheckStatus(object):
       checks_critical: List of checks in CRITICAL state ([Job()]).
     """
 
-    def __init__(self, args, logger, jobs=None, checks=None):
+    def __init__(self, args, logger, runtime_mode=False, jobs=None, checks=None):
         """
         @param args: Parsed command line arguments
         @param logger: logging logger
+        @param runtime_mode: Execute runtime-checks (not age) or the other way around
         :type jobs: JobsList or None
         """
 
@@ -820,6 +840,7 @@ class CheckStatus(object):
         self._checks = {} if checks is None else checks
         self._args = args
         self._logger = logger
+        self._runtime_mode = runtime_mode
         self._last_num_checked = None
 
         if jobs is not None:
@@ -896,7 +917,7 @@ class CheckStatus(object):
             check_filename = os.path.join(self._args.checkdir, name + '.ini')
             self._logger.debug('Loading check definition from {!r}'.format(check_filename))
             try:
-                self._checks[name] = Check.from_file(check_filename, self._logger)
+                self._checks[name] = Check.from_file(check_filename, self._logger, runtime_mode=self._runtime_mode)
             except ScriptHerderError:
                 raise CheckLoadError('Failed loading check', filename = check_filename)
 
@@ -1016,7 +1037,7 @@ def mode_wrap(args, logger):
     logger.debug("Finished, exit status {!r}".format(job.exit_status))
     logger.debug("Job output:\n{!s}".format(job.output))
     # Record what the jobs status evaluates to at the time of execution
-    checkstatus = CheckStatus(args, logger)
+    checkstatus = CheckStatus(args, logger, runtime_mode = True)
     try:
         check = checkstatus.get_check(job.name)
     except CheckLoadError:
@@ -1209,6 +1230,11 @@ def _to_bytes(data):
         return data.encode('latin-1')
     except AttributeError:
         return data
+
+def _criteria_to_str(criteria):
+    name, value, negate = criteria
+    eq = '!=' if negate else '=='
+    return '{}{}{}'.format(name, eq, value)
 
 
 def main(myname = 'scriptherder', args = None, logger = None, defaults=_defaults):

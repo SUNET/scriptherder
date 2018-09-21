@@ -11,8 +11,8 @@ logger = logging.getLogger('unittest')
 
 class TestChecks(unittest.TestCase):
 
-    def _run(self, cmd, ok='', warn='', run=True):
-        check = Check(ok, warn, 'unit_testing', logger)
+    def _run(self, cmd, ok='', warn='', run=True, runtime_mode = True):
+        check = Check(ok, warn, 'unit_testing', logger, runtime_mode=True)
         self.job = Job('unittest_job', cmd)
         if run:
             self.job.run()
@@ -20,6 +20,11 @@ class TestChecks(unittest.TestCase):
         # Call status summary for all the tests to make sure it works in all
         # possible states
         logger.debug('Job status summary: {}'.format(self.job.status_summary()))
+        if not runtime_mode:
+            logger.info('Unit test evaluating checks again, post-execution')
+            check = Check(ok, warn, 'unit_testing', logger, runtime_mode=False)
+            self.job.check(check, logger)
+            logger.debug('Job status summary: {}'.format(self.job.status_summary()))
 
     def test_exit_status_ok(self):
         """ Test exit status matching OK criteria """
@@ -52,37 +57,43 @@ class TestChecks(unittest.TestCase):
     def test_max_age(self):
         """ Test max_age criteria """
         self._run(['/bin/echo', 'test'],
-                  ok = 'exit_status=0, max_age=10s', warn = 'exit_status=0, max_age=3h')
+                  ok = 'exit_status=0, max_age=10s', warn = 'exit_status=0, max_age=3h',
+                  runtime_mode = False)
         self.assertTrue(self.job.is_ok())
         self.assertFalse(self.job.is_warning())
 
     def test_max_age_negated(self):
         """ Test max_age criteria (negated) """
         self._run(['/bin/echo', 'test'],
-                  ok = 'exit_status=0, !max_age=10s', warn = 'exit_status=0, max_age=3h')
+                  ok = 'exit_status=0, !max_age=10s', warn = 'exit_status=0, max_age=3h',
+                  runtime_mode = False)
         self.assertFalse(self.job.is_ok())
         self.assertTrue(self.job.is_warning())
 
     def test_file_exists(self):
         """ Test file_exists criteria """
         self._run(['/bin/echo', 'test'],
-                  ok = 'exit_status=1', warn = 'exit_status=1,OR_file_exists=/etc/services')
+                  ok = 'exit_status=1', warn = 'exit_status=1,OR_file_exists=/etc/services',
+                  runtime_mode = False)
         self.assertFalse(self.job.is_ok())
         self.assertTrue(self.job.is_warning())
 
     def test_file_exists_negated(self):
         """ Test file_exists criteria (negated) """
         self._run(['/bin/false'],
-                  ok = 'exit_status=0,!OR_file_exists=/this_could_be_a_FAIL_file')
+                  ok = 'exit_status=0,!OR_file_exists=/this_could_be_a_FAIL_file',
+                  runtime_mode = False)
         self.assertTrue(self.job.is_ok())
 
     def test_file_exists_fail(self):
         """ Test file_exists criteria failure """
         self._run(['/bin/false'],
-                  ok = 'OR_file_exists=/this_file_should_not_exist')
+                  ok = 'exit_status=0,OR_file_exists=/this_file_should_not_exist',
+                  runtime_mode = False)
         self.assertFalse(self.job.is_ok())
         self.assertEqual(self.job.check_status, 'CRITICAL')
-        self.assertEqual(self.job.check_reason, 'file_does_not_exist=/this_file_should_not_exist')
+        self.assertEqual(self.job.check_reason,
+                         'file_does_not_exist=/this_file_should_not_exist, stored_status=OK==False')
 
     def test_OR_running(self):
         """ Test OR_running criteria """
