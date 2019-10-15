@@ -763,7 +763,8 @@ class Check(object):
         return False, 'age={}>{}'.format(job.age, _time_to_str(value))
 
     def check_output_contains(self, job, value, negate):
-        res = (_to_bytes(value) in _to_bytes(job.output))
+        _output_bytes = b'' if job.output is None else _to_bytes(job.output)
+        res = (_to_bytes(value) in _output_bytes)
         if negate:
             res = not res  # invert result
         neg_str = '!' if negate else ''
