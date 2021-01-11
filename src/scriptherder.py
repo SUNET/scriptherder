@@ -401,7 +401,7 @@ class Job(object):
         if self._output is not None:
             output_fn = self.output_filename
             logger.debug("Saving job output to file {!r}".format(output_fn))
-            with open(output_fn + '.tmp', 'w') as fd:
+            with open(output_fn + '.tmp', 'wb') as fd:
                 fd.write(self._output)
             os.rename(output_fn + '.tmp', output_fn)
             self._output = None
