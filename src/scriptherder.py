@@ -752,7 +752,10 @@ class Check(object):
     def check_max_age(self, job, value, negate):
         value = _parse_time_value(value)
         now = int(time.time())
-        res = (job.end_time > (now - value))
+        if job.end_time is None:
+            res = False
+        else:
+            res = (job.end_time > (now - value))
         if negate:
             res = not res
         if res:
