@@ -957,10 +957,6 @@ def parse_args(defaults: Mapping[str, Any]) -> Arguments:
         "--debug", dest="debug", action="store_true", default=defaults["debug"], help="Enable debug operation"
     )
     parser.add_argument(
-        "--syslog", dest="syslog", action="store_true", default=defaults["syslog"], help="Enable syslog output"
-    )
-
-    parser.add_argument(
         "-d", "--datadir", dest="datadir", default=defaults["datadir"], help="Data directory", metavar="PATH"
     )
     parser.add_argument(
@@ -980,6 +976,9 @@ def parse_args(defaults: Mapping[str, Any]) -> Arguments:
 
     parser_wrap.add_argument("-N", "--name", dest="name", help="Job name", metavar="NAME", required=True)
     parser_wrap.add_argument("cmd", nargs="+", default=[], help="Script command", metavar="CMD")
+    parser_wrap.add_argument(
+        "--syslog", dest="syslog", action="store_true", default=defaults["syslog"], help="Enable syslog output"
+    )
 
     parser_ls.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
     parser_check.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
