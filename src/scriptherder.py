@@ -1008,6 +1008,87 @@ def parse_args(defaults: Mapping[str, Any]) -> Arguments:
     return cast(Arguments, args)
 
 
+class ColumnMeta:
+    """
+    Metadata for a column
+    """
+
+    def __init__(self, name: str, width: int = 0, align: str = ""):
+        self.name = name
+        self.width = width
+        self.align = align
+        self.update_width(len(name))
+
+    def update_width(self, value: int) -> None:
+        if value > self.width:
+            self.width = value
+
+    def to_string(self, element: Tuple[str, int]) -> str:
+        (value, print_width) = element
+        _pad = " " * (self.width - print_width)
+        if self.align == "right":
+            return _pad + value
+        return value + _pad
+
+
+class DataTable:
+    """Format data in fixed-width columns"""
+
+    def __init__(self, meta: List[ColumnMeta]) -> None:
+        self.rows: List[List[Tuple[str, int]]] = []
+        self._curr: List[Tuple[str, int]] = []
+        self._meta = meta
+
+        self.without_ANSI = re.compile(
+            r"""
+            \x1b     # literal ESC
+            \[       # literal [
+            [;\d]*   # zero or more digits or semicolons
+            [A-Za-z] # a letter
+            """,
+            re.VERBOSE,
+        ).sub
+
+    def push(self, value: str) -> None:
+        """Add a value to the current row"""
+        _print_width = len(self.without_ANSI("", value))  # get the actual print width for this value
+        self._curr.append((value, _print_width))
+
+        if len(self._meta) >= len(self._curr):
+            _meta = self._meta[len(self._curr) - 1]
+            _meta.update_width(len(self.without_ANSI("", value)))
+
+    def new_line(self) -> None:
+        self.rows.append(self._curr)
+        self._curr = []
+
+    def __str__(self) -> str:
+        """Return the formatted table"""
+        res: List[str] = []
+
+        # Output field names
+        _this = ""
+        for header in self._meta:
+            _element = (header.name, len(header.name))
+            _this += f"{header.to_string(_element)}  "
+        _this = _this.rstrip()
+        res.append(_this)
+
+        # Output data rows
+        for row in self.rows:
+            _this = ""
+            for idx in range(len(row)):
+                if len(self._meta) >= idx:
+                    _meta = self._meta[idx]
+                    _this += _meta.to_string(row[idx])
+                else:
+                    _this += str(row[idx])
+                _this += "  "
+            _this = _this.rstrip()
+            res.append(_this)
+        return "\n".join(res)
+
+
 def mode_wrap(args: Arguments, logger: logging.Logger) -> bool:
     """
     Execute a job and save result state in a file.
@@ -1052,7 +1133,25 @@ def mode_ls(args: Arguments, logger: logging.Logger) -> bool:
 
     checkstatus = CheckStatus(args, logger)
 
+    _fields = [
+        ColumnMeta("Start time", align="right"),
+        ColumnMeta("Duration"),
+        ColumnMeta("Age"),
+        ColumnMeta("Status"),
+        ColumnMeta("Criteria"),
+        ColumnMeta("Name"),
+        ColumnMeta("Filename"),
+    ]
+    data = DataTable(meta=_fields)
+
     for this in chosen_jobs:
+        start = "***"
+        if this.start_time:
+            start = time.strftime("%Y-%m-%d %X", time.localtime(this.start_time))
+        data.push(start)
+        data.push(this.duration_str)
+        data.push(this.age + " ago")
+
         if this in last_of_each:
             # For the last instance of each job, evaluate full check-mode status
             temp_jobs = JobsList(args, logger, jobs=[this], load_not_running=False)
@@ -1063,6 +1162,7 @@ def mode_ls(args: Arguments, logger: logging.Logger) -> bool:
             if this.exit_status != 0:
                 level = "Non-zero"
             msg = "exit={}, age={}".format(this.exit_status, this.age)
+
         color1 = ""
         color2 = ""
         reset = ""
@@ -1072,26 +1172,15 @@ def mode_ls(args: Arguments, logger: logging.Logger) -> bool:
             reset = "\033[0;0m"
             if level == "CRITICAL":
                 color1 = "\033[1;31m"  # red
-        status = "{color1}{level:<8s} {color2}{msg:<20s}{reset}".format(
-            color1=color1,
-            color2=color2,
-            reset=reset,
-            level=level,
-            msg=msg,
-        )
-        start = "***"
-        if this.start_time:
-            start = time.strftime("%Y-%m-%d %X", time.localtime(this.start_time))
-        print(
-            "{start:>19s}  {duration:>7}  {age:>9}  {status}  name={name:<25}  {filename}".format(
-                start=start,
-                duration=this.duration_str,
-                status=status,
-                age=this.age + " ago",
-                name=this.name,
-                filename=this.filename,
-            )
-        )
+
+        data.push(color1 + level + reset)
+        data.push(color2 + (msg or "") + reset)
+
+        data.push(this.name)
+        data.push(this.filename or "")
+        data.new_line()
+
+    print(data)
     return True
 
 
