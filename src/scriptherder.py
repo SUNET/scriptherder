@@ -470,9 +470,11 @@ class JobsList:
                 except JobLoadError as exc:
                     logger.warning("Failed loading job file {!r} ({!s})".format(exc.filename, exc.reason))
                     continue
-                if args.cmd and args.cmd != ["ALL"]:
-                    if job.name not in args.cmd:
-                        logger.debug("Skipping {!r} not matching {!r} (file {!s})".format(job.name, args.cmd, filename))
+                if args.names and args.names != ["ALL"]:
+                    if job.name not in args.names:
+                        logger.debug(
+                            "Skipping {!r} not matching {!r} (file {!s})".format(job.name, args.names, filename)
+                        )
                         continue
                 jobs.append(job)
         # Sort jobs, oldest first
@@ -494,10 +496,10 @@ class JobsList:
             if not this.endswith(".ini"):
                 continue
             name = this[:-4]  # remove the '.ini' suffix
-            if self._args.cmd and self._args.cmd != ["ALL"]:
-                if name not in self._args.cmd:
+            if self._args.names and self._args.names != ["ALL"]:
+                if name not in self._args.names:
                     self._logger.debug(
-                        "Skipping not-running {!r} not matching {!r} (file {!s})".format(name, self._args.cmd, this)
+                        "Skipping not-running {!r} not matching {!r} (file {!s})".format(name, self._args.names, this)
                     )
                     continue
             if name not in self.by_name:
@@ -923,7 +925,7 @@ class CheckStatus:
                 return "CRITICAL", self.checks_critical[-1].check_reason
             if self.checks_unknown:
                 return "UNKNOWN", self.checks_unknown[-1].check_reason
-            return "FAIL", "No jobs found for {!r}?".format(self._args.cmd)
+            return "FAIL", "No jobs found for {!r}?".format(self._args.names)
 
         # When looking at multiple jobs at once, logic gets a bit reversed - if ANY
         # job invocation is CRITICAL/WARNING, the aggregate message given to
@@ -952,58 +954,48 @@ def parse_args(defaults: Mapping[str, Any]) -> Arguments:
     )
 
     parser.add_argument(
-        "--debug",
-        dest="debug",
-        action="store_true",
-        default=defaults["debug"],
-        help="Enable debug operation",
+        "--debug", dest="debug", action="store_true", default=defaults["debug"], help="Enable debug operation"
     )
     parser.add_argument(
-        "--syslog",
-        dest="syslog",
-        action="store_true",
-        default=defaults["syslog"],
-        help="Enable syslog output",
+        "--syslog", dest="syslog", action="store_true", default=defaults["syslog"], help="Enable syslog output"
+    )
+
+    parser.add_argument(
+        "-d", "--datadir", dest="datadir", default=defaults["datadir"], help="Data directory", metavar="PATH"
     )
     parser.add_argument(
-        "--mode",
+        "--checkdir", dest="checkdir", default=defaults["checkdir"], help="Check definitions directory", metavar="PATH"
+    )
+
+    subparsers = parser.add_subparsers(
+        help="Mode of operation",
         dest="mode",
-        choices=["wrap", "ls", "check", "lastlog", "lastfaillog"],
-        default=defaults["mode"],
-        help="What mode to run in",
-    )
-    parser.add_argument(
-        "-d",
-        "--datadir",
-        dest="datadir",
-        default=defaults["datadir"],
-        help="Data directory",
-        metavar="PATH",
-    )
-    parser.add_argument(
-        "--checkdir",
-        dest="checkdir",
-        default=defaults["checkdir"],
-        help="Check definitions directory",
-        metavar="PATH",
-    )
-    parser.add_argument(
-        "-N",
-        "--name",
-        dest="name",
-        help="Job name",
-        metavar="NAME",
     )
 
-    parser.add_argument(
-        "cmd",
-        nargs="*",
-        default=[],
-        help="Script command",
-        metavar="CMD",
-    )
+    parser_wrap = subparsers.add_parser("wrap", help="Wrap a command and store metadata about it")
+    parser_ls = subparsers.add_parser("ls", help="List jobs (jobs are created with 'wrap'")
+    parser_check = subparsers.add_parser("check", help="Return status of jobs in a Nagios compatible way")
+    parser_lastlog = subparsers.add_parser("lastlog", help="Show last entry for a job")
+    parser_lastfaillog = subparsers.add_parser("lastfaillog", help="Show last failure entry for a job")
 
-    args = parser.parse_args()
+    parser_wrap.add_argument("-N", "--name", dest="name", help="Job name", metavar="NAME", required=True)
+    parser_wrap.add_argument("cmd", nargs="+", default=[], help="Script command", metavar="CMD")
+
+    parser_ls.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
+    parser_check.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
+    parser_lastlog.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
+    parser_lastfaillog.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
+
+    _args = sys.argv[1:]
+    if _args and _args[0] == "--mode":
+        # Old style invocation. Need to remove the "--mode" argument to have the subparser execute.
+        _args = _args[1:]
+    if not _args:
+        # If we set subparsers.default to "ls", the parser_ls won't execute and there won't be an args.name
+        # which causes issues later on. So we need to add a dummy argument to make the parser execute.
+        _args = ["ls"]
+
+    args = parser.parse_args(_args)
 
     return cast(Arguments, args)
 
@@ -1124,9 +1116,9 @@ def mode_ls(args: Arguments, logger: logging.Logger) -> bool:
     """
     jobs = JobsList(args, logger)
     last_of_each = jobs.last_of_each
-    if not args.cmd:
+    if not args.names:
         # Short-mode, just show the last execution for all jobs
-        print("\n=== Showing the last execution of each job, use '--mode ls ALL' to see all executions\n")
+        print("\n=== Showing the last execution of each job, use 'ls ALL' to see all executions\n")
         chosen_jobs = last_of_each
     else:
         chosen_jobs = jobs.jobs
@@ -1188,7 +1180,7 @@ def mode_check(args: Arguments, logger: logging.Logger) -> int:
     """
     Evaluate the stored states for either a specific job, or all jobs.
 
-    Return Nagios compatible output (scriptherder --mode check is intended to
+    Return Nagios compatible output ("scriptherder check" is intended to
                                      run using Nagios NRPE or similar).
 
     @param args: Parsed command line arguments
@@ -1343,10 +1335,6 @@ def main(myname: str, args: Arguments, logger: Optional[logging.Logger] = None) 
         syslog_h.setFormatter(formatter)
         syslog_h.setLevel(logging.INFO)
         logger.addHandler(syslog_h)
-
-    if args.name and args.mode != "wrap":
-        logger.error("Argument --name only applicable for --mode wrap")
-        return False
 
     if args.mode == "wrap":
         return mode_wrap(args, logger)
