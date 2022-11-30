@@ -90,6 +90,7 @@ _defaults = {
     "mode": "ls",
     "datadir": "/var/cache/scriptherder",
     "checkdir": "/etc/scriptherder/check",
+    "umask": "077",
 }
 
 _check_defaults = {
@@ -367,7 +368,10 @@ class Job:
             )
             filename = "{}__ts-{}_pid-{}".format(fn, _time_str, self.pid)
         fn = str(os.path.join(datadir, filename))
-        logger.debug("Saving job metadata to file {!r}.tmp".format(fn))
+        _umask = int(f"0o{args.umask}", 8)
+        logger.debug(f"Setting umask to 0o{_umask:03o}")
+        old_umask = os.umask(_umask)
+        logger.debug("Saving job metadata to file '{!s}.tmp'".format(fn))
         output_fn = fn + "_output"
         f = open(fn + ".tmp", "w")
         if self._output is not None:
@@ -378,6 +382,7 @@ class Job:
         f.close()
         os.rename(fn + ".tmp", fn + ".json")
         self._data["filename"] = fn
+        os.umask(old_umask)
 
         if self._output is not None:
             assert self.output_filename is not None
@@ -975,6 +980,13 @@ def parse_args(defaults: Mapping[str, Any]) -> Arguments:
     parser_lastfaillog = subparsers.add_parser("lastfaillog", help="Show last failure entry for a job")
 
     parser_wrap.add_argument("-N", "--name", dest="name", help="Job name", metavar="NAME", required=True)
+    parser_wrap.add_argument(
+        "--umask",
+        dest="umask",
+        help=f"Job output file umask (default: {defaults['umask']})",
+        metavar="OCTAL",
+        default=defaults["umask"],
+    )
     parser_wrap.add_argument("cmd", nargs="+", default=[], help="Script command", metavar="CMD")
     parser_wrap.add_argument(
         "--syslog", dest="syslog", action="store_true", default=defaults["syslog"], help="Enable syslog output"
@@ -995,6 +1007,9 @@ def parse_args(defaults: Mapping[str, Any]) -> Arguments:
         _args = ["ls"]
 
     args = parser.parse_args(_args)
+
+    if args.mode == "wrap" and len(args.umask) != 3:
+        parser.error(f"Umask must be 3 digits (e.g. the default '{defaults['umask']}')")
 
     return cast(Arguments, args)
 
@@ -1328,7 +1343,7 @@ def main(myname: str, args: Arguments, logger: Optional[logging.Logger] = None) 
             this_h.setLevel(logging.ERROR)
     if args.debug:
         logger.setLevel(logging.DEBUG)
-    if args.syslog:
+    if args.mode == "wrap" and args.syslog:
         syslog_h = logging.handlers.SysLogHandler("/dev/log")
         formatter = logging.Formatter("%(name)s: %(levelname)s %(message)s")
         syslog_h.setFormatter(formatter)
