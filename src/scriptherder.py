@@ -72,6 +72,7 @@ import json
 import logging
 import logging.handlers
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -91,6 +92,7 @@ _defaults = {
     "datadir": "/var/cache/scriptherder",
     "checkdir": "/etc/scriptherder/check",
     "umask": "077",
+    "random_sleep": 0,
 }
 
 _check_defaults = {
@@ -991,6 +993,14 @@ def parse_args(defaults: Mapping[str, Any]) -> Arguments:
     parser_wrap.add_argument(
         "--syslog", dest="syslog", action="store_true", default=defaults["syslog"], help="Enable syslog output"
     )
+    parser_wrap.add_argument(
+        "--random-sleep",
+        dest="random_sleep",
+        type=int,
+        default=defaults["random_sleep"],
+        help="Random sleep before execution",
+        metavar="MAX_SECONDS",
+    )
 
     parser_ls.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
     parser_check.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
@@ -1103,7 +1113,11 @@ def mode_wrap(args: Arguments, logger: logging.Logger) -> bool:
     @param logger: logging logger
     """
     job = Job(args.name, cmd=args.cmd)
-    logger.debug("Invoking '{!s}'".format("".join(args.cmd)))
+    if args.random_sleep:
+        _seconds: float = random.random() * args.random_sleep
+        logger.debug(f"Sleeping for {_seconds:.2f} seconds")
+        time.sleep(_seconds)
+    logger.debug("Invoking '{!s}'".format(" ".join(args.cmd)))
     job.run()
     logger.debug("Finished, exit status {!r}".format(job.exit_status))
     logger.debug("Job output:\n{!s}".format(job.output))
