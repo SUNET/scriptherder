@@ -384,7 +384,6 @@ class Job:
         f.close()
         os.rename(fn + ".tmp", fn + ".json")
         self._data["filename"] = fn
-        os.umask(old_umask)
 
         if self._output is not None:
             assert self.output_filename is not None
@@ -394,6 +393,10 @@ class Job:
                 fd.write(self._output)
             os.rename(output_fn + ".tmp", output_fn)
             self._output = None
+
+        # Restore the umask after all
+        # file operations are done.
+        os.umask(old_umask)
 
     def check(self, check: "Check", logger: logging.Logger) -> None:
         """
