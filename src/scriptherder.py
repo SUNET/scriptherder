@@ -1386,6 +1386,8 @@ if __name__ == "__main__":
         progname = os.path.basename(sys.argv[0])
         args = parse_args(_defaults)
         res = main(progname, args=args)
+        if isinstance(res, bool):
+            sys.exit(int(not res))
         if isinstance(res, int):
             sys.exit(res)
         if res:
