@@ -27,8 +27,8 @@ class TestCheckStatus(unittest.TestCase):
         checks = {}
         self.check_ok = 'exit_status=0, max_age=1m'
         self.check_warn = 'exit_status=0, max_age=5m'
-        job1 = Job('test1', '/bin/true').run()
-        job2 = Job('test1', '/bin/true').run()
+        job1 = Job(name='test1', cmd=['/usr/bin/true'].run()
+        job2 = Job(name='test1', cmd=['/usr/bin/true'].run()
         job1.check(self.check, logger)
         job2.check(self.check, logger)
         # back-date both jobs beyond warning
