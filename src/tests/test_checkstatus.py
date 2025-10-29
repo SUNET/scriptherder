@@ -22,7 +22,7 @@ class TestCheckStatus(unittest.TestCase):
                      filename = 'unit_testing', logger = logger,
                      runtime_mode = self.runtime_mode)
 
-    def test_two_failing_jobs(self):
+    def test_two_delayed_jobs_critical(self):
         """ Test two failing jobs """
         checks = {}
         self.check_ok = 'exit_status=0, max_age=1m'
