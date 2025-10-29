@@ -99,6 +99,23 @@ class TestCheckStatus(unittest.TestCase):
         self.assertEqual(1, cs.num_jobs)
         self.assertEqual(('CRITICAL', 'stored_status=OK==False'), cs.aggregate_status())
 
+    def test_missconfigured_critera(self):
+        """Real world scenario:
+        """
+        checks = {}
+        self.check_ok = 'exit_status=0,max_age=50m'
+        self.check_warn = 'exit_status=0,max_age=1'
+        job1 = Job(name='test1', cmd=['/usr/bin/false'])
+        job1.run()
+        _move_back(job1, 10 )
+        job1.check(self.check, logger)
+        self.runtime_mode = False
+        checks['test1'] = self.check
+        jobs = JobsList(None, logger, [job1], load_not_running=False)
+        cs = CheckStatus(None, logger, jobs=jobs, checks=checks)
+        self.assertEqual(1, cs.num_jobs)
+        self.assertEqual(('CRITICAL', 'stored_status=OK==False, age=10s>1s'), cs.aggregate_status())
+
 
 
 def _move_back(job, seconds):
