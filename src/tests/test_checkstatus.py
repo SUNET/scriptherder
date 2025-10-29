@@ -43,6 +43,24 @@ class TestCheckStatus(unittest.TestCase):
         self.assertEqual(1, cs.num_jobs)
         self.assertEqual(('CRITICAL', 'age=19m>1m, age=19m>5m'), cs.aggregate_status())
 
+    def test_positive_followed_by_negative_jobs(self):
+        """ Real world scenario: Command runs successful, command fails """
+        checks = {}
+        self.check_ok = 'exit_status=0'
+        self.check_warn = 'exit_status=0'
+        job1 = Job(name='test1', cmd=['/usr/bin/true'])
+        job2 = Job(name='test1', cmd=['/usr/bin/false'])
+        job1.run()
+        job2.run()
+        job1.check(self.check, logger)
+        job2.check(self.check, logger)
+        self.runtime_mode = False
+        checks['test1'] = self.check
+        jobs = JobsList(None, logger, [job1, job2], load_not_running=False)
+        cs = CheckStatus(None, logger, jobs=jobs, checks=checks)
+        self.assertEqual(1, cs.num_jobs)
+        self.assertEqual(('CRITICAL', 'stored_status=OK==False'), cs.aggregate_status())
+
 
 def _move_back(job, seconds):
     job._data['start_time'] = job.start_time - seconds

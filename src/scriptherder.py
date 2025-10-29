@@ -422,6 +422,9 @@ class Job:
     def is_ok(self) -> bool:
         return self.check_status == "OK"
 
+    def is_critical(self) -> bool:
+        return self.check_status == "CRITICAL"
+
     def is_warning(self) -> bool:
         return self.check_status == "WARNING"
 
@@ -886,6 +889,13 @@ class CheckStatus:
                         self.checks_warning.append(job)
                         matched = True
                         break
+                    else:
+                        self._logger.debug("Checking for CRITICAL status")
+                        if job.is_critical():
+                            self._logger.debug("Job status is CRITICAL")
+                            self.checks_critical.append(job)
+                            matched = True
+                            break
 
             if not matched:
                 self._logger.debug("Concluding CRITICAL status")
