@@ -422,6 +422,9 @@ class Job:
     def is_ok(self) -> bool:
         return self.check_status == "OK"
 
+    def is_critical(self) -> bool:
+        return self.check_status == "CRITICAL"
+
     def is_warning(self) -> bool:
         return self.check_status == "WARNING"
 
@@ -575,6 +578,8 @@ class Check:
             raise CheckLoadError("Failed loading file", filename)
         if not runtime_mode:
             self._ok_criteria += [cast(TCriteria, ("stored_status", "OK", False))]
+            # A failed job should always be critical. Without a warning critera `_evaluate` will return true causing the job just warn.
+            self._warning_criteria += [cast(TCriteria, ("stored_status", "OK", False))]
 
     def _parse_criteria(self, data_str: str, runtime_mode: bool) -> List[TCriteria]:
         """
@@ -886,6 +891,13 @@ class CheckStatus:
                         self.checks_warning.append(job)
                         matched = True
                         break
+                    else:
+                        self._logger.debug("Checking for CRITICAL status")
+                        if job.is_critical():
+                            self._logger.debug("Job status is CRITICAL")
+                            self.checks_critical.append(job)
+                            matched = True
+                            break
 
             if not matched:
                 self._logger.debug("Concluding CRITICAL status")

@@ -41,7 +41,7 @@ class TestChecks(unittest.TestCase):
 
     def test_exit_status_critical(self):
         """ Test exit status matching neither OK nor WARN criteria """
-        self._run(['/bin/true', 'test'],
+        self._run(['/usr/bin/true', 'test'],
                   ok = 'exit_status=1', warn = 'exit_status=2')
         self.assertFalse(self.job.is_ok())
         self.assertFalse(self.job.is_warning())
@@ -49,7 +49,7 @@ class TestChecks(unittest.TestCase):
 
     def test_exit_status_negated1(self):
         """ Test exit status matching OK criteria (negated) """
-        self._run(['/bin/false'],
+        self._run(['/usr/bin/false'],
                   ok = '!exit_status=0')
         self.assertTrue(self.job.is_ok())
         self.assertFalse(self.job.is_warning())
@@ -80,14 +80,14 @@ class TestChecks(unittest.TestCase):
 
     def test_file_exists_negated(self):
         """ Test file_exists criteria (negated) """
-        self._run(['/bin/false'],
+        self._run(['/usr/bin/false'],
                   ok = 'exit_status=0,!OR_file_exists=/this_could_be_a_FAIL_file',
                   runtime_mode = False)
         self.assertTrue(self.job.is_ok())
 
     def test_file_exists_fail(self):
         """ Test file_exists criteria failure """
-        self._run(['/bin/false'],
+        self._run(['/usr/bin/false'],
                   ok = 'exit_status=0,OR_file_exists=/this_file_should_not_exist',
                   runtime_mode = False)
         self.assertFalse(self.job.is_ok())
