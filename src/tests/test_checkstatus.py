@@ -43,6 +43,27 @@ class TestCheckStatus(unittest.TestCase):
         self.assertEqual(1, cs.num_jobs)
         self.assertEqual(('CRITICAL', 'age=19m>1m, age=19m>5m'), cs.aggregate_status())
 
+    def test_two_delayed_jobs_warning(self):
+        """ Test two failing jobs """
+        checks = {}
+        self.check_ok = 'exit_status=0, max_age=1m'
+        self.check_warn = 'exit_status=0, max_age=2h'
+        job1 = Job(name='test1', cmd=['/usr/bin/true'])
+        job2 = Job(name='test1', cmd=['/usr/bin/true'])
+        job1.run()
+        job2.run()
+        job1.check(self.check, logger)
+        job2.check(self.check, logger)
+        # back-date both jobs beyond warning
+        _move_back(job1, 2 * 60)
+        _move_back(job2, 4 * 60)
+        self.runtime_mode = False
+        checks['test1'] = self.check
+        jobs = JobsList(None, logger, [job1, job2], load_not_running=False)
+        cs = CheckStatus(None, logger, jobs=jobs, checks=checks)
+        self.assertEqual(1, cs.num_jobs)
+        self.assertEqual(('WARNING', 'age=2m>1m, max_age=2h, stored_status=OK==True'), cs.aggregate_status())
+
     def test_positive_followed_by_negative_jobs(self):
         """ Real world scenario: Command runs successful, command fails """
         checks = {}
