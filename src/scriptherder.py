@@ -578,6 +578,8 @@ class Check:
             raise CheckLoadError("Failed loading file", filename)
         if not runtime_mode:
             self._ok_criteria += [cast(TCriteria, ("stored_status", "OK", False))]
+            # A failed job should always be critical. Without a warning critera `_evaluate` will return true causing the job just warn.
+            self._warning_criteria += [cast(TCriteria, ("stored_status", "OK", False))]
 
     def _parse_criteria(self, data_str: str, runtime_mode: bool) -> List[TCriteria]:
         """
