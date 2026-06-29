@@ -489,6 +489,9 @@ class JobsList:
                             "Skipping {!r} not matching {!r} (file {!s})".format(job.name, args.names, filename)
                         )
                         continue
+                if hasattr(args, "exclude") and args.exclude and job.name in args.exclude:
+                    logger.debug("Excluding {!r} (file {!s})".format(job.name, filename))
+                    continue
                 jobs.append(job)
         # Sort jobs, oldest first
         self.jobs = sorted(jobs, key=lambda x: x.start_time if x.start_time is not None else 0)
@@ -515,6 +518,9 @@ class JobsList:
                         "Skipping not-running {!r} not matching {!r} (file {!s})".format(name, self._args.names, this)
                     )
                     continue
+            if hasattr(self._args, "exclude") and self._args.exclude and name in self._args.exclude:
+                self._logger.debug("Excluding not-running {!r} (file {!s})".format(name, this))
+                continue
             if name not in self.by_name:
                 filename = os.path.join(self._args.checkdir, this)
                 self._logger.debug("Check {!r} (filename {!r}) not found in jobs".format(name, filename))
@@ -1019,6 +1025,7 @@ def parse_args(defaults: Mapping[str, Any]) -> Arguments:
 
     parser_ls.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
     parser_check.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
+    parser_check.add_argument("--exclude", dest="exclude", nargs="+", default=[], help="Names of jobs to exclude", metavar="NAME")
     parser_lastlog.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
     parser_lastfaillog.add_argument("names", nargs="*", default=[], help="Names of jobs to include", metavar="NAME")
 
