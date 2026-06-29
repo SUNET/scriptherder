@@ -6,11 +6,10 @@ Example wrapping of a script run from cron:
 
   */15 * * * *   root   scriptherder --mode wrap --syslog --name my_job -- /usr/local/bin/my_job -v
 
-Nagios NRPE checks. One specific for my_job, one catch-all and one that excludes a specific job from all:
+Nagios NRPE checks. One specific for my_job, one catch-all that excludes already checked cosmos:
 
-  command[check_scripts]=/usr/local/bin/scriptherder --mode check
-  command[check_cosmos]=/usr/local/bin/scriptherder --mode check my_job
-  command[check_cosmos]=/usr/local/bin/scriptherder --mode check --exclude my_other_job
+  command[check_cosmos]=/usr/local/bin/scriptherder --mode check cosmos  
+  command[check_scripts]=/usr/local/bin/scriptherder --mode check --exclude cosmos
 
 To manually inspect the entrys in the 'database':
 
